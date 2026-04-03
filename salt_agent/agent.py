@@ -48,12 +48,6 @@ from salt_agent.token_budget import BudgetTracker
 from salt_agent.streaming_executor import StreamingToolExecutor, SAFE_STREAMING_TOOLS
 from salt_agent.tools.base import ToolRegistry
 
-# Tools that are safe to execute in parallel (no side effects, independent I/O)
-PARALLEL_SAFE_TOOLS = frozenset({
-    "web_fetch", "web_search", "read", "glob", "grep", "list_files",
-})
-
-
 class SaltAgent:
     """The core agent: iterative LLM + tool execution loop."""
 
