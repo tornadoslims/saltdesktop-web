@@ -1523,9 +1523,24 @@ async def _run_agent(
     except (TypeError, AttributeError):
         pass
 
-    # Show completion summary line
+    # Show completion summary line (skip for empty responses)
     elapsed = time.monotonic() - run_start
-    _print_completion_summary(elapsed, tool_count[0], tracker)
+    if text_started[0] or tool_count[0] > 0:
+        _print_completion_summary(elapsed, tool_count[0], tracker)
+
+
+def _get_git_branch(cwd: str) -> str:
+    """Return the current git branch name, or empty string if not in a repo."""
+    try:
+        result = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=cwd, capture_output=True, text=True, timeout=2,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -1635,7 +1650,9 @@ async def _interactive(
 
         try:
             auto_indicator = f" {_c(_YELLOW, 'AUTO')}" if agent.config.auto_mode else ""
-            prompt_str = f"{_c(_CYAN, display_dir)}{auto_indicator} {_c(_DIM, '>')} " if _USE_COLOR else f"{display_dir}{' AUTO' if agent.config.auto_mode else ''} > "
+            branch = _get_git_branch(agent.config.working_directory)
+            branch_str = f" {_c(_DIM, f'({branch})')}" if branch else ""
+            prompt_str = f"{_c(_CYAN, display_dir)}{branch_str}{auto_indicator} {_c(_DIM, '>')} " if _USE_COLOR else f"{display_dir}{f' ({branch})' if branch else ''}{' AUTO' if agent.config.auto_mode else ''} > "
             line = input(prompt_str)
         except EOFError:
             _write(f"\n{_c(_DIM, 'Goodbye!')}\n")
@@ -1705,8 +1722,24 @@ async def _interactive(
             _write(f"\n  {_c(_YELLOW, 'Cancelled.')}\n\n")
             continue
         except Exception as e:
-            _write(f"\n  {_c(_RED, f'\u274c {e}')}\n\n")
+            err_msg = str(e)
+            width = _term_width() - 6  # indent + margin
+            if width > 20 and len(err_msg) > width:
+                import textwrap
+                wrapped = textwrap.fill(err_msg, width=width)
+                _write(f"\n  {_c(_RED, f'\u274c {wrapped}')}\n\n")
+            else:
+                _write(f"\n  {_c(_RED, f'\u274c {err_msg}')}\n\n")
             continue
+
+        # Show follow-up suggestions if available
+        if hasattr(agent, 'stop_hooks') and hasattr(agent.stop_hooks, 'last_suggestions'):
+            suggestions = agent.stop_hooks.last_suggestions
+            if suggestions:
+                _write(f"\n  {_c(_DIM, 'Suggestions:')}\n")
+                for s in suggestions:
+                    _write(f"    {_c(_DIM, f'→ {s}')}\n")
+                _write("\n")
 
         _write("\n")
 
@@ -1807,6 +1840,35 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Coordinator mode: delegate only, no direct file writes or command execution",
     )
     parser.add_argument(
+        "--no-color",
+        action="store_true",
+        help="Disable colored output",
+    )
+    parser.add_argument(
+        "--max-budget-usd",
+        type=float,
+        help="Maximum dollar amount to spend on API calls",
+    )
+    parser.add_argument(
+        "--no-session-persistence",
+        action="store_true",
+        help="Disable session persistence",
+    )
+    parser.add_argument(
+        "--append-system-prompt",
+        help="Append to the default system prompt",
+    )
+    parser.add_argument(
+        "--resume",
+        metavar="SESSION_ID",
+        help="Resume a previous session",
+    )
+    parser.add_argument(
+        "--bare",
+        action="store_true",
+        help="Minimal mode: skip hooks, memory, plugins",
+    )
+    parser.add_argument(
         "-v", "--version",
         action="version",
         version=f"salt-agent {__version__}",
@@ -1821,6 +1883,11 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> None:
     parser = _build_parser()
     args = parser.parse_args(argv)
+
+    # --no-color: disable colored output before any output
+    if args.no_color or os.environ.get("NO_COLOR"):
+        global _USE_COLOR
+        _USE_COLOR = False
 
     # If no prompt and not interactive, default to interactive
     if not args.interactive and args.prompt is None:
@@ -1850,9 +1917,36 @@ def main(argv: list[str] | None = None) -> None:
         coordinator_mode=args.coordinator,
     )
 
+    # --max-budget-usd: set budget limit
+    if args.max_budget_usd is not None:
+        config.max_budget_usd = args.max_budget_usd
+
+    # --no-session-persistence: disable persistence
+    if args.no_session_persistence:
+        config.persist = False
+
+    # --append-system-prompt: append to system prompt
+    if args.append_system_prompt:
+        config.system_prompt = (config.system_prompt or "") + "\n\n" + args.append_system_prompt
+
+    # --resume: load a previous session
+    if args.resume:
+        config.session_id = args.resume
+
+    # --bare: minimal mode — disable hooks, memory, plugins, MCP
+    if args.bare:
+        config.persist = False
+        config.enable_mcp = False
+        config.skill_dirs = []
+
     from salt_agent.agent import SaltAgent
 
     agent = SaltAgent(config)
+
+    # --bare: clear hooks after agent creation
+    if args.bare:
+        from salt_agent.hooks import HookEngine
+        agent.hooks = HookEngine()
 
     if args.interactive:
         try:

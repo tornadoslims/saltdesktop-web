@@ -51,3 +51,5 @@ class AgentConfig:
     mcp_config_path: str = ""  # Override .mcp.json location (default: working_directory/.mcp.json)
     # Skill directories — additional directories to scan for skills
     skill_dirs: list = field(default_factory=list)
+    # Budget limit — maximum dollar amount to spend on API calls (0 = unlimited)
+    max_budget_usd: float = 0.0

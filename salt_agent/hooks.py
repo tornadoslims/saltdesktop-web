@@ -66,6 +66,10 @@ class HookEngine:
         """Register a shell command as a hook for an event type."""
         self.on(event, ShellHook(command))
 
+    def register_http_hook(self, event: str, url: str, timeout: float = 5.0) -> None:
+        """Register an HTTP webhook for an event."""
+        self.on(event, HttpHook(url, timeout))
+
 
 class ShellHook:
     """A hook that executes a shell command. Input/output via JSON stdin/stdout."""
@@ -88,6 +92,35 @@ class ShellHook:
                     action=response.get("action", "allow"),
                     reason=response.get("reason", ""),
                 )
+        except Exception:
+            pass
+        return None
+
+
+class HttpHook:
+    """A hook that fires an HTTP POST to a URL with JSON payload."""
+
+    def __init__(self, url: str, timeout: float = 5.0):
+        self.url = url
+        self.timeout = timeout
+
+    def __call__(self, data: dict) -> HookResult | None:
+        import urllib.request
+        import json
+
+        try:
+            payload = json.dumps(data).encode("utf-8")
+            req = urllib.request.Request(
+                self.url,
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                if resp.status == 200:
+                    body = json.loads(resp.read().decode())
+                    action = body.get("action", "allow")
+                    return HookResult(action=action, reason=body.get("reason", ""))
         except Exception:
             pass
         return None

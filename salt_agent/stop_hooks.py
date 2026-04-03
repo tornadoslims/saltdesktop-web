@@ -26,7 +26,10 @@ class StopHookRunner:
             self._extract_memories,
             self._generate_session_title,
             self._log_turn_stats,
+            self._consolidate_memories,
+            self._generate_suggestions,
         ]
+        self.last_suggestions: list[str] = []
 
     async def run_after_turn(self, messages: list[dict], turn: int) -> None:
         """Run all stop hooks. Called after each completed turn."""
@@ -115,6 +118,91 @@ class StopHookRunner:
                     len(str(m.get("content", ""))) // 4 for m in messages
                 ),
             })
+
+    async def _consolidate_memories(self, messages: list[dict], turn: int) -> None:
+        """Consolidate memories: merge duplicates, remove stale, organize.
+
+        Runs every 20 turns (expensive operation).
+        """
+        if turn % 20 != 0 or turn == 0:
+            return
+
+        memory_files = self.agent.memory.scan_memory_files()
+        if len(memory_files) < 3:
+            return  # not enough to consolidate
+
+        # Build a summary of all memories
+        summaries = []
+        for mf in memory_files:
+            content = self.agent.memory.load_memory_file(mf["filename"])
+            summaries.append(
+                f"File: {mf['filename']}\nType: {mf.get('type', '?')}\n"
+                f"Description: {mf.get('description', '')}\nContent: {content[:300]}"
+            )
+
+        prompt = (
+            "Review these memory files and suggest consolidation:\n\n"
+            + "\n".join(summaries) + "\n\n"
+            "For each action, respond with one of:\n"
+            "- KEEP: filename (no change needed)\n"
+            "- MERGE: filename1 + filename2 -> new_name (combine duplicates)\n"
+            "- DELETE: filename (stale or useless)\n"
+            "- UPDATE: filename -> new_description (better description)\n\n"
+            "Only suggest changes if clearly needed. When in doubt, KEEP."
+        )
+
+        result = await self.agent.provider.quick_query(prompt, max_tokens=500)
+
+        # Parse and apply DELETE actions only (safest)
+        for line in result.splitlines():
+            line = line.strip()
+            if line.startswith("DELETE:"):
+                filename = line.split(":", 1)[1].strip()
+                # Only delete if the file actually exists
+                file_path = self.agent.memory.memory_dir / filename
+                if file_path.exists():
+                    file_path.unlink()
+                    self.agent.memory._update_index(filename, "")  # remove from index
+
+    async def _generate_suggestions(self, messages: list[dict], turn: int) -> None:
+        """Generate follow-up prompt suggestions.
+
+        Only runs when the last message is from the assistant with plain text
+        (i.e., the final response, not a mid-turn tool result exchange).
+        """
+        if turn < 1:
+            return
+
+        # Only generate suggestions at the end of a conversation turn, not
+        # between tool calls. If the last message is tool_results (list content
+        # from user role), we're mid-turn and should skip.
+        if messages:
+            last_msg = messages[-1]
+            if last_msg.get("role") == "user" and isinstance(last_msg.get("content"), list):
+                return
+
+        # Get the last exchange
+        recent = messages[-2:] if len(messages) >= 2 else messages
+        conversation = "\n".join(
+            f"[{m.get('role', '?')}]: {str(m.get('content', ''))[:200]}"
+            for m in recent
+        )
+
+        prompt = (
+            "Based on this exchange, suggest 2-3 brief follow-up prompts the user "
+            "might want to try. Each should be under 60 characters. Return as a "
+            "simple numbered list.\n\n" + conversation
+        )
+
+        result = await self.agent.provider.quick_query(prompt, max_tokens=200)
+
+        # Store suggestions for the CLI to display
+        self.last_suggestions = []
+        for line in result.strip().splitlines():
+            line = line.strip().lstrip("0123456789.-) ")
+            if line and len(line) < 80:
+                self.last_suggestions.append(line)
+        self.last_suggestions = self.last_suggestions[:3]
 
     @staticmethod
     def _format_messages(messages: list[dict]) -> str:

@@ -348,3 +348,85 @@ class TestTokenTracker:
         tracker.add(1_000_000, 1_000_000)
         cost = tracker.estimated_cost
         assert cost > 0  # Should use default rates
+
+
+# ---------------------------------------------------------------------------
+# New CLI flags
+# ---------------------------------------------------------------------------
+
+class TestNewCLIFlags:
+    def test_no_color_flag(self):
+        parser = _build_parser()
+        args = parser.parse_args(["--no-color", "hello"])
+        assert args.no_color is True
+
+    def test_no_color_default_false(self):
+        parser = _build_parser()
+        args = parser.parse_args(["hello"])
+        assert args.no_color is False
+
+    def test_max_budget_usd_flag(self):
+        parser = _build_parser()
+        args = parser.parse_args(["--max-budget-usd", "5.50", "hello"])
+        assert args.max_budget_usd == 5.50
+
+    def test_max_budget_usd_default_none(self):
+        parser = _build_parser()
+        args = parser.parse_args(["hello"])
+        assert args.max_budget_usd is None
+
+    def test_bare_flag(self):
+        parser = _build_parser()
+        args = parser.parse_args(["--bare", "hello"])
+        assert args.bare is True
+
+    def test_bare_default_false(self):
+        parser = _build_parser()
+        args = parser.parse_args(["hello"])
+        assert args.bare is False
+
+    def test_resume_flag(self):
+        parser = _build_parser()
+        args = parser.parse_args(["--resume", "sess-abc123", "hello"])
+        assert args.resume == "sess-abc123"
+
+    def test_resume_default_none(self):
+        parser = _build_parser()
+        args = parser.parse_args(["hello"])
+        assert args.resume is None
+
+    def test_no_session_persistence_flag(self):
+        parser = _build_parser()
+        args = parser.parse_args(["--no-session-persistence", "hello"])
+        assert args.no_session_persistence is True
+
+    def test_append_system_prompt_flag(self):
+        parser = _build_parser()
+        args = parser.parse_args(["--append-system-prompt", "Be concise.", "hello"])
+        assert args.append_system_prompt == "Be concise."
+
+
+# ---------------------------------------------------------------------------
+# Git branch display
+# ---------------------------------------------------------------------------
+
+class TestGitBranch:
+    def test_get_git_branch_returns_branch(self):
+        from salt_agent.cli import _get_git_branch
+        # Run against a known git repo (this project itself)
+        import subprocess
+        try:
+            result = subprocess.run(
+                ["git", "branch", "--show-current"],
+                capture_output=True, text=True, timeout=2,
+            )
+            expected = result.stdout.strip()
+        except Exception:
+            expected = ""
+        branch = _get_git_branch(".")
+        assert branch == expected
+
+    def test_get_git_branch_nonexistent_dir(self):
+        from salt_agent.cli import _get_git_branch
+        branch = _get_git_branch("/nonexistent/path/that/does/not/exist")
+        assert branch == ""

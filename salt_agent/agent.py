@@ -566,6 +566,15 @@ class SaltAgent:
             if self.persistence:
                 self.persistence.save_checkpoint(messages, system_prompt)
 
+            # Budget limit check
+            if self.budget and self.config.max_budget_usd:
+                if self.budget.total_cost_estimate >= self.config.max_budget_usd:
+                    yield AgentError(
+                        error=f"Budget limit reached (${self.config.max_budget_usd})",
+                        recoverable=False,
+                    )
+                    return
+
             # Fire pre_api_call hook
             self.hooks.fire("pre_api_call", {
                 "messages": turn_messages,
@@ -752,7 +761,20 @@ class SaltAgent:
                     except Exception as e:
                         return (tu, f"Error: {str(e)}", False)
 
-                completed = await asyncio.gather(*[_run_one(tu) for tu in tool_uses])
+                try:
+                    completed = await asyncio.gather(*[_run_one(tu) for tu in tool_uses])
+                except (KeyboardInterrupt, asyncio.CancelledError):
+                    # Cancel cleanup: add cancel results for all tool calls
+                    for tu in tool_uses:
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": tu.tool_id,
+                            "content": "Tool call cancelled by user.",
+                        })
+                    if tool_results:
+                        self._conversation_messages.append({"role": "user", "content": tool_results})
+                    yield AgentError(error="Cancelled by user.", recoverable=False)
+                    return
 
                 # Emit all ToolEnd events and build results
                 for tu, result, success in completed:
@@ -785,116 +807,131 @@ class SaltAgent:
                     })
             else:
                 # --- Sequential execution path (handles both sync and async tools) ---
-                for tu in tool_uses:
-                    # Fire pre_tool_use hook -- can block
-                    hook_result = await self.hooks.fire_async("pre_tool_use", {
-                        "tool_name": tu.tool_name,
-                        "tool_input": tu.tool_input,
-                    })
-
-                    if hook_result.action == "block":
-                        result = f"Tool blocked: {hook_result.reason}"
-                        yield ToolStart(tool_name=tu.tool_name, tool_input=tu.tool_input)
-                        yield ToolEnd(
-                            tool_name=tu.tool_name,
-                            result=result,
-                            success=False,
-                        )
-                        tools_used.append(tu.tool_name)
-                        tool_results.append({
-                            "type": "tool_result",
-                            "tool_use_id": tu.tool_id,
-                            "content": result,
+                try:
+                    for tu in tool_uses:
+                        # Fire pre_tool_use hook -- can block
+                        hook_result = await self.hooks.fire_async("pre_tool_use", {
+                            "tool_name": tu.tool_name,
+                            "tool_input": tu.tool_input,
                         })
-                        continue
 
-                    yield ToolStart(tool_name=tu.tool_name, tool_input=tu.tool_input)
-                    tools_used.append(tu.tool_name)
+                        if hook_result.action == "block":
+                            result = f"Tool blocked: {hook_result.reason}"
+                            yield ToolStart(tool_name=tu.tool_name, tool_input=tu.tool_input)
+                            yield ToolEnd(
+                                tool_name=tu.tool_name,
+                                result=result,
+                                success=False,
+                            )
+                            tools_used.append(tu.tool_name)
+                            tool_results.append({
+                                "type": "tool_result",
+                                "tool_use_id": tu.tool_id,
+                                "content": result,
+                            })
+                            continue
 
-                    tool = self.tools.get(tu.tool_name)
-                    if tool and tool.is_async():
-                        # --- Async tool path: yield events from the generator ---
-                        result = ""
-                        success = True
-                        try:
-                            async for item in tool.async_execute(**tu.tool_input):
-                                if item["type"] == "event":
-                                    # Forward subagent/child events to the parent's stream
-                                    yield item["event"]
-                                elif item["type"] == "result":
-                                    result = item["content"]
-                        except Exception as e:
-                            result = f"Error: {str(e)}"
-                            success = False
+                        yield ToolStart(tool_name=tu.tool_name, tool_input=tu.tool_input)
+                        tools_used.append(tu.tool_name)
 
-                        if not result.startswith("Error"):
+                        tool = self.tools.get(tu.tool_name)
+                        if tool and tool.is_async():
+                            # --- Async tool path: yield events from the generator ---
+                            result = ""
                             success = True
-                        else:
-                            success = False
+                            try:
+                                async for item in tool.async_execute(**tu.tool_input):
+                                    if item["type"] == "event":
+                                        # Forward subagent/child events to the parent's stream
+                                        yield item["event"]
+                                    elif item["type"] == "result":
+                                        result = item["content"]
+                            except Exception as e:
+                                result = f"Error: {str(e)}"
+                                success = False
 
-                        yield ToolEnd(
-                            tool_name=tu.tool_name,
-                            result=result[:200],
-                            success=success,
-                        )
+                            if not result.startswith("Error"):
+                                success = True
+                            else:
+                                success = False
 
-                    elif tool:
-                        # --- Sync tool path: existing behavior ---
-                        try:
-                            result = tool.execute(**tu.tool_input)
-                            success = True
                             yield ToolEnd(
                                 tool_name=tu.tool_name,
                                 result=result[:200],
-                                success=True,
+                                success=success,
                             )
-                        except Exception as e:
-                            result = f"Error: {str(e)}"
+
+                        elif tool:
+                            # --- Sync tool path: existing behavior ---
+                            try:
+                                result = tool.execute(**tu.tool_input)
+                                success = True
+                                yield ToolEnd(
+                                    tool_name=tu.tool_name,
+                                    result=result[:200],
+                                    success=True,
+                                )
+                            except Exception as e:
+                                result = f"Error: {str(e)}"
+                                success = False
+                                yield ToolEnd(
+                                    tool_name=tu.tool_name,
+                                    result=result,
+                                    success=False,
+                                )
+                        else:
+                            available = ", ".join(self.tools.names())
+                            result = (
+                                f"Error: Tool '{tu.tool_name}' does not exist. "
+                                f"Available tools: {available}. "
+                                f"Do NOT try to simulate this tool with bash echo or other workarounds. "
+                                f"If you cannot accomplish the task with available tools, say so."
+                            )
                             success = False
                             yield ToolEnd(
                                 tool_name=tu.tool_name,
                                 result=result,
                                 success=False,
                             )
-                    else:
-                        available = ", ".join(self.tools.names())
-                        result = (
-                            f"Error: Tool '{tu.tool_name}' does not exist. "
-                            f"Available tools: {available}. "
-                            f"Do NOT try to simulate this tool with bash echo or other workarounds. "
-                            f"If you cannot accomplish the task with available tools, say so."
-                        )
-                        success = False
-                        yield ToolEnd(
-                            tool_name=tu.tool_name,
-                            result=result,
-                            success=False,
-                        )
 
-                    # Fire post_tool_use hook
-                    self.hooks.fire("post_tool_use", {
-                        "tool_name": tu.tool_name,
-                        "result": result[:500],
-                        "success": success,
-                    })
+                        # Fire post_tool_use hook
+                        self.hooks.fire("post_tool_use", {
+                            "tool_name": tu.tool_name,
+                            "result": result[:500],
+                            "success": success,
+                        })
 
-                    result = self.context.truncate_tool_result(result)
+                        result = self.context.truncate_tool_result(result)
 
-                    # Track for loop detection
-                    _sig = f"{tu.tool_name}:{_hl.md5(str(tu.tool_input).encode()).hexdigest()[:8]}"
-                    _recent_tool_sigs.append(_sig)
-                    _rh = _hl.md5(result.encode()).hexdigest()[:8]
-                    if _rh == _last_result_hash:
-                        _consecutive_same_result += 1
-                    else:
-                        _consecutive_same_result = 0
-                    _last_result_hash = _rh
+                        # Track for loop detection
+                        _sig = f"{tu.tool_name}:{_hl.md5(str(tu.tool_input).encode()).hexdigest()[:8]}"
+                        _recent_tool_sigs.append(_sig)
+                        _rh = _hl.md5(result.encode()).hexdigest()[:8]
+                        if _rh == _last_result_hash:
+                            _consecutive_same_result += 1
+                        else:
+                            _consecutive_same_result = 0
+                        _last_result_hash = _rh
 
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": tu.tool_id,
-                        "content": result,
-                    })
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": tu.tool_id,
+                            "content": result,
+                        })
+                except (KeyboardInterrupt, asyncio.CancelledError):
+                    # Cancel cleanup: add cancel results for unprocessed tool calls
+                    processed_ids = {r["tool_use_id"] for r in tool_results}
+                    for tu in tool_uses:
+                        if tu.tool_id not in processed_ids:
+                            tool_results.append({
+                                "type": "tool_result",
+                                "tool_use_id": tu.tool_id,
+                                "content": "Tool call cancelled by user.",
+                            })
+                    if tool_results:
+                        self._conversation_messages.append({"role": "user", "content": tool_results})
+                    yield AgentError(error="Cancelled by user.", recoverable=False)
+                    return
 
             # Inject pending images from ReadTool as multimodal content
             read_tool = self.tools.get("read")

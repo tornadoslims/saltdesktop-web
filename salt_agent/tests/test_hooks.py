@@ -224,6 +224,87 @@ class TestHookEngineAsync:
         assert result.action == "block"
 
 
+class TestHttpHook:
+    def test_http_hook_sends_post(self):
+        """HttpHook should POST JSON to the given URL."""
+        from salt_agent.hooks import HttpHook
+        from unittest.mock import patch, MagicMock
+        import json
+
+        hook = HttpHook("http://example.com/hook", timeout=2.0)
+
+        # Mock urlopen to return a 200 response with allow action
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.read.return_value = json.dumps({"action": "allow", "reason": "ok"}).encode()
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+
+        with patch("urllib.request.urlopen", return_value=mock_resp) as mock_urlopen:
+            result = hook({"tool": "bash"})
+
+        assert mock_urlopen.called
+        assert result is not None
+        assert result.action == "allow"
+        assert result.reason == "ok"
+
+    def test_http_hook_block_action(self):
+        """HttpHook should return block when server responds with block."""
+        from salt_agent.hooks import HttpHook
+        from unittest.mock import patch, MagicMock
+        import json
+
+        hook = HttpHook("http://example.com/hook")
+
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.read.return_value = json.dumps({"action": "block", "reason": "forbidden"}).encode()
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            result = hook({"tool": "bash"})
+
+        assert result.action == "block"
+        assert result.reason == "forbidden"
+
+    def test_http_hook_handles_timeout(self):
+        """HttpHook should return None on timeout (no crash)."""
+        from salt_agent.hooks import HttpHook
+        from unittest.mock import patch
+        import urllib.error
+
+        hook = HttpHook("http://example.com/hook", timeout=0.001)
+
+        with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("timeout")):
+            result = hook({"tool": "bash"})
+
+        assert result is None
+
+    def test_http_hook_handles_connection_error(self):
+        """HttpHook should return None on connection error."""
+        from salt_agent.hooks import HttpHook
+        from unittest.mock import patch
+
+        hook = HttpHook("http://example.com/hook")
+
+        with patch("urllib.request.urlopen", side_effect=ConnectionError("refused")):
+            result = hook({"tool": "bash"})
+
+        assert result is None
+
+    def test_register_http_hook(self):
+        """HookEngine.register_http_hook should add an HttpHook."""
+        from salt_agent.hooks import HttpHook
+        engine = HookEngine()
+        engine.register_http_hook("pre_tool_use", "http://example.com/hook")
+        # Verify hook is registered
+        hooks = engine._hooks.get("pre_tool_use", [])
+        assert len(hooks) == 1
+        assert isinstance(hooks[0], HttpHook)
+        assert hooks[0].url == "http://example.com/hook"
+
+
 class TestHookEvents:
     def test_hook_events_list_populated(self):
         assert len(HOOK_EVENTS) > 0
