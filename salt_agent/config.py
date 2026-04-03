@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from salt_agent.permissions import PermissionRule
+    from salt_agent.tools.bash import BashSandbox
 
 
 @dataclass
@@ -55,3 +56,5 @@ class AgentConfig:
     max_budget_usd: float = 0.0
     # Show follow-up suggestions after each turn (default: OFF)
     show_suggestions: bool = False
+    # Bash sandbox configuration (None = no sandbox)
+    bash_sandbox: object = None  # BashSandbox | None

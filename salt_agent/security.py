@@ -2,9 +2,42 @@
 
 Rules-based classifier that categorizes bash commands as safe/needs-review/dangerous
 before execution.  Designed to be fast (no LLM call) and conservative.
+
+Also provides an async AI classifier that uses a cheap LLM side-query for
+more nuanced classification of ambiguous commands.
 """
 
 from __future__ import annotations
+
+
+async def ai_classify_bash(command: str, provider) -> tuple[str, str]:
+    """Use a cheap LLM call to classify a bash command's safety.
+
+    Returns (action, reason) where action is "allow", "ask", or "deny".
+    """
+    prompt = f"""Classify this bash command's safety level.
+
+Command: {command}
+
+Respond with EXACTLY one line in this format:
+ACTION: allow|ask|deny
+REASON: brief explanation
+
+Rules:
+- allow: read-only commands, standard dev tools (ls, cat, grep, git status, python, pytest, npm test)
+- ask: state-modifying but common (rm files, git push, pip install, chmod, mv)
+- deny: destructive or dangerous (rm -rf /, sudo, dd, mkfs, fork bombs, curl|bash)
+"""
+    try:
+        result = await provider.quick_query(prompt, max_tokens=50)
+        for line in result.strip().splitlines():
+            if line.startswith("ACTION:"):
+                action = line.split(":", 1)[1].strip().lower()
+                if action in ("allow", "ask", "deny"):
+                    return action, result
+        return "ask", "Could not parse classifier response"
+    except Exception:
+        return "ask", "Classifier failed, defaulting to ask"
 
 
 class SecurityClassifier:

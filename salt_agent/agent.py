@@ -10,6 +10,7 @@ from typing import AsyncIterator
 
 from salt_agent.attachments import AttachmentAssembler
 from salt_agent.compaction import (
+    CompactionCache,
     compact_context,
     context_collapse,
     emergency_truncate,
@@ -148,6 +149,9 @@ class SaltAgent:
 
         # Attachment assembler (per-turn system-reminder injection)
         self.attachments = AttachmentAssembler(self)
+
+        # Compaction cache (avoids reprocessing already-compacted messages)
+        self._compaction_cache = CompactionCache()
 
         # Persistent conversation history for interactive mode
         self._conversation_messages: list[dict] = []
@@ -495,6 +499,12 @@ class SaltAgent:
                 for tool in mcp_tools:
                     self.tools.register(tool)
                 self._mcp_started = True
+                # Update state with MCP info
+                server_names = getattr(self.mcp_manager, "server_names", [])
+                self.state.update(
+                    mcp_servers=list(server_names) if server_names else [],
+                    mcp_tools_count=len(mcp_tools),
+                )
             except Exception as e:
                 import logging
                 logging.getLogger(__name__).warning("MCP startup failed: %s", e)
@@ -544,8 +554,8 @@ class SaltAgent:
             # Context pressure check
             messages = self.context.manage_pressure(messages)
 
-            # Layer 1: Microcompaction — truncate old tool results (every turn)
-            messages = microcompact_tool_results(messages)
+            # Layer 1: Microcompaction — truncate old tool results (every turn, cached)
+            messages = self._compaction_cache.microcompact_with_cache(messages)
 
             # Layer 2: History snip — snip old assistant text at 60%
             messages = history_snip(messages, self.config.context_window)
@@ -588,6 +598,7 @@ class SaltAgent:
                     "new_tokens": new_tokens,
                 })
                 self.state.update(status="compacting")
+                self._compaction_cache.invalidate()  # message indices changed
                 yield ContextCompacted(
                     old_tokens=old_tokens,
                     new_tokens=new_tokens,
@@ -597,7 +608,15 @@ class SaltAgent:
             system_prompt = self._build_system_prompt()
 
             # --- Per-turn system-reminder injection (into a COPY of messages) ---
-            reminders = self.attachments.assemble()
+            current_msg_text = messages[-1].get("content", "") if messages else ""
+            if isinstance(current_msg_text, list):
+                current_msg_text = " ".join(
+                    b.get("text", "") for b in current_msg_text
+                    if isinstance(b, dict) and b.get("type") == "text"
+                )
+            elif not isinstance(current_msg_text, str):
+                current_msg_text = str(current_msg_text)
+            reminders = self.attachments.assemble(turn=turn, current_message=current_msg_text)
 
             # Inject relevant memories via LLM side-query
             last_content = messages[-1].get("content", "") if messages else ""
@@ -630,7 +649,11 @@ class SaltAgent:
                             "count": len(memory_files),
                             "files": memory_files,
                         })
-                        self.state.update(memories_surfaced_this_turn=len(memory_files))
+                        mem_count = len(self.memory.scan_memory_files())
+                        self.state.update(
+                            memories_surfaced_this_turn=len(memory_files),
+                            memory_files_count=mem_count,
+                        )
                 except Exception:
                     pass  # Memory recall must never crash the agent
 
@@ -727,10 +750,14 @@ class SaltAgent:
                 input_toks = self.provider.last_usage.get("input_tokens", 0)
                 output_toks = self.provider.last_usage.get("output_tokens", 0)
                 self.budget.record_usage(input_toks, output_toks)
+                remaining = 0.0
+                if self.config.max_budget_usd > 0:
+                    remaining = max(0.0, self.config.max_budget_usd - self.budget.total_cost_estimate)
                 self.state.update(
                     total_input_tokens=self.budget.total_input,
                     total_output_tokens=self.budget.total_output,
                     total_cost=self.budget.total_cost_estimate,
+                    budget_remaining=remaining,
                 )
 
             # Fire post_api_call hook
@@ -754,6 +781,7 @@ class SaltAgent:
                 )
                 new_tokens = estimate_messages_tokens(messages)
                 self._conversation_messages[:] = messages
+                self._compaction_cache.invalidate()  # message indices changed
                 yield ContextCompacted(old_tokens=old_tokens, new_tokens=new_tokens)
                 continue  # retry this turn with compacted context
 
@@ -940,7 +968,7 @@ class SaltAgent:
                             "success": success,
                         })
 
-                        # Fire file hooks for write/edit tools
+                        # Fire file hooks and update state for file operations
                         if success:
                             file_path = tu.tool_input.get("file_path", "")
                             if tu.tool_name == "write" and file_path:
@@ -955,6 +983,23 @@ class SaltAgent:
                                 if file_path not in written:
                                     written.append(file_path)
                                     self.state.update(files_written=written)
+                            elif tu.tool_name == "read" and file_path:
+                                read_files = list(self.state.state.files_read)
+                                if file_path not in read_files:
+                                    read_files.append(file_path)
+                                    self.state.update(files_read=read_files)
+
+                        # Update active_tasks state after task operations
+                        if tu.tool_name in ("task_create", "task_stop") and hasattr(self, "task_manager"):
+                            running_ids = [
+                                t.id for t in self.task_manager.list_tasks()
+                                if t.status.value == "running"
+                            ]
+                            self.state.update(active_tasks=running_ids)
+
+                        # Update active_subagents after agent tool
+                        if tu.tool_name == "agent" and hasattr(self, "subagent_manager"):
+                            self.state.update(active_subagents=self.subagent_manager.active_count)
 
                         result = self.context.truncate_tool_result(result)
 
@@ -1040,7 +1085,7 @@ class SaltAgent:
                         "success": success,
                     })
 
-                    # Fire file hooks for write/edit tools
+                    # Fire file hooks and update state for file operations
                     if success:
                         file_path = tu.tool_input.get("file_path", "")
                         if tu.tool_name == "write" and file_path:
@@ -1055,6 +1100,23 @@ class SaltAgent:
                             if file_path not in written:
                                 written.append(file_path)
                                 self.state.update(files_written=written)
+                        elif tu.tool_name == "read" and file_path:
+                            read_files = list(self.state.state.files_read)
+                            if file_path not in read_files:
+                                read_files.append(file_path)
+                                self.state.update(files_read=read_files)
+
+                    # Update active_tasks state after task operations
+                    if tu.tool_name in ("task_create", "task_stop") and hasattr(self, "task_manager"):
+                        running_ids = [
+                            t.id for t in self.task_manager.list_tasks()
+                            if t.status.value == "running"
+                        ]
+                        self.state.update(active_tasks=running_ids)
+
+                    # Update active_subagents after agent tool
+                    if tu.tool_name == "agent" and hasattr(self, "subagent_manager"):
+                        self.state.update(active_subagents=self.subagent_manager.active_count)
 
                     result = self.context.truncate_tool_result(result)
 

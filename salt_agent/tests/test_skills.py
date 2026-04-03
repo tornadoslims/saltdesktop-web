@@ -178,7 +178,11 @@ class TestScriptsAndReferences:
 class TestBundledSkills:
     """Verify all expected bundled skills are discovered."""
 
-    EXPECTED_BUNDLED = {"commit", "review", "simplify", "debug", "test", "explain", "refactor"}
+    EXPECTED_BUNDLED = {
+        "commit", "review", "simplify", "debug", "test", "explain", "refactor",
+        "pr", "init", "scaffold", "migrate", "deploy", "monitor", "optimize",
+        "document", "security-audit", "upgrade",
+    }
 
     def test_all_bundled_skills_discovered(self):
         mgr = SkillManager()

@@ -238,6 +238,62 @@ class TestStateStore:
         assert isinstance(agent.state, StateStore)
         assert agent.state.state.status == "idle"
 
+    def test_budget_remaining_updates(self):
+        """budget_remaining should update when total_cost changes."""
+        from salt_agent.state import StateStore
+        store = StateStore()
+        store.update(budget_remaining=5.0)
+        assert store.state.budget_remaining == 5.0
+
+    def test_files_read_tracks(self):
+        """files_read state field should track read files."""
+        from salt_agent.state import StateStore
+        store = StateStore()
+        store.update(files_read=["a.py"])
+        assert store.state.files_read == ["a.py"]
+        store.update(files_read=["a.py", "b.py"])
+        assert store.state.files_read == ["a.py", "b.py"]
+
+    def test_mcp_state_fields(self):
+        """mcp_servers and mcp_tools_count should be settable."""
+        from salt_agent.state import StateStore
+        store = StateStore()
+        store.update(mcp_servers=["puppeteer", "fs"], mcp_tools_count=5)
+        assert store.state.mcp_servers == ["puppeteer", "fs"]
+        assert store.state.mcp_tools_count == 5
+
+    def test_active_tasks_and_subagents(self):
+        """active_tasks and active_subagents should be settable."""
+        from salt_agent.state import StateStore
+        store = StateStore()
+        store.update(active_tasks=["t1", "t2"], active_subagents=3)
+        assert store.state.active_tasks == ["t1", "t2"]
+        assert store.state.active_subagents == 3
+
+    def test_memory_files_count(self):
+        from salt_agent.state import StateStore
+        store = StateStore()
+        store.update(memory_files_count=7)
+        assert store.state.memory_files_count == 7
+
+    def test_status_subscriber_for_status_bar(self):
+        """Simulate cli.py status bar subscription pattern."""
+        from salt_agent.state import StateStore
+        store = StateStore()
+        status_changes = []
+
+        def on_change(field, value):
+            if field == "status":
+                status_changes.append(value)
+
+        store.subscribe(on_change)
+        store.update(status="thinking")
+        store.update(status="executing_tool")
+        store.update(current_tool="read")  # should NOT trigger
+        store.update(status="idle")
+
+        assert status_changes == ["thinking", "executing_tool", "idle"]
+
 
 # ---------------------------------------------------------------------------
 # Feature 3: Plugin entry_points Discovery

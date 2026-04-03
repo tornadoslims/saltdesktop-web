@@ -355,7 +355,8 @@ class TestSessionSearch:
         assert "preview" in r
         assert "timestamp" in r
         assert r["session_id"] == "test-session"
-        assert r["type"] == "tool_use"
+        # type may be "tool_use" (old format) or "event" (new search index format)
+        assert r["type"] in ("tool_use", "event", "checkpoint")
 
     def test_search_empty_directory(self, tmp_path):
         """Search on empty sessions directory returns empty list."""

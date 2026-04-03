@@ -51,6 +51,55 @@ def microcompact_tool_results(
     return messages
 
 
+class CompactionCache:
+    """Cache microcompact results to avoid reprocessing already-compacted messages."""
+
+    def __init__(self) -> None:
+        self._compacted_indices: set[int] = set()  # message indices already compacted
+
+    def microcompact_with_cache(
+        self,
+        messages: list[dict],
+        max_result_chars: int = 5000,
+        recent_keep: int = 6,
+    ) -> list[dict]:
+        """Only process messages not already compacted.
+
+        Skips indices that were already truncated in a prior call, avoiding
+        redundant string slicing on every turn.
+        """
+        cutoff = max(0, len(messages) - recent_keep)
+
+        for i in range(cutoff):
+            if i in self._compacted_indices:
+                continue  # already compacted
+
+            msg = messages[i]
+            content = msg.get("content", "")
+            did_work = False
+            if isinstance(content, list):
+                for j, block in enumerate(content):
+                    if isinstance(block, dict) and block.get("type") == "tool_result":
+                        result_text = block.get("content", "")
+                        if isinstance(result_text, str) and len(result_text) > max_result_chars:
+                            truncated = (
+                                result_text[:2000]
+                                + "\n\n[...truncated...]\n\n"
+                                + result_text[-1000:]
+                            )
+                            messages[i]["content"][j] = dict(block)
+                            messages[i]["content"][j]["content"] = truncated
+                            did_work = True
+
+            self._compacted_indices.add(i)
+
+        return messages
+
+    def invalidate(self) -> None:
+        """Clear cache (call after full compaction changes message indices)."""
+        self._compacted_indices.clear()
+
+
 # ---------------------------------------------------------------------------
 # History snip -- snip old assistant text responses at 60% capacity
 # ---------------------------------------------------------------------------

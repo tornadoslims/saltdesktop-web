@@ -907,6 +907,24 @@ class SlashCompleter:
         return out
 
 
+def _display_matches(substitution: str, matches: list[str], longest_match_length: int) -> None:
+    """Custom display for tab completion — show slash commands with descriptions."""
+    print()  # move to next line
+    for match in sorted(matches):
+        cmd = match.strip()
+        desc = _SLASH_COMMANDS.get(cmd, "")
+        if desc:
+            print(f"  {_c(_CYAN, cmd.ljust(20))} {_c(_DIM, desc)}")
+        else:
+            print(f"  {cmd}")
+    # Redraw the current input line
+    if _readline is not None:
+        buf = _readline.get_line_buffer()
+        sys.stdout.write(f"\n> {buf}")
+        sys.stdout.flush()
+        _readline.redisplay()
+
+
 def _setup_readline(agent=None) -> None:
     """Configure readline: tab completion, persistent history, keybindings."""
     if _readline is None:
@@ -917,6 +935,9 @@ def _setup_readline(agent=None) -> None:
     completer = SlashCompleter(all_commands, agent)
     _readline.set_completer(completer.complete)
     _readline.set_completer_delims(" \t\n")
+
+    # Custom display hook: show command descriptions alongside matches
+    _readline.set_completion_display_matches_hook(_display_matches)
 
     # libedit (macOS) vs GNU readline use different bind syntax
     if "libedit" in (_readline.__doc__ or ""):
@@ -1129,11 +1150,13 @@ def _handle_slash_command(
         if agent.persistence:
             results = agent.persistence.search_sessions(query)
             if results:
-                _write(f"\n  {_c(_BOLD, f'Search results for \"{query}\"')}\n\n")
+                _write(f"\n  {_c(_BOLD, f'Search results for \"{query}\"')} {_c(_DIM, f'({len(results)} hits)')}\n\n")
                 for r in results:
                     ts = r.get("timestamp", "")[:19]
                     sid = r["session_id"][:12]
-                    _write(f"  {_c(_CYAN, sid)} {_c(_DIM, ts)} [{r['type']}]\n")
+                    score = r.get("score", 0)
+                    score_str = f" score={score:.0f}" if score else ""
+                    _write(f"  {_c(_CYAN, sid)} {_c(_DIM, ts)} [{r['type']}]{_c(_DIM, score_str)}\n")
                     preview = r["preview"][:120]
                     if len(r["preview"]) > 120:
                         preview += "..."
@@ -2626,6 +2649,13 @@ async def _interactive(
 
     # Persistent status bar
     status_bar = StatusBar(agent)
+
+    # Subscribe to state changes to refresh status bar on status transitions
+    def _on_state_change(field, value):
+        if field == "status":
+            status_bar.draw()
+
+    agent.state.subscribe(_on_state_change)
 
     # Enable readline: tab completion, persistent history, keybindings
     _setup_readline(agent)

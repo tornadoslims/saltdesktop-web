@@ -6,7 +6,7 @@ import fnmatch
 from dataclasses import dataclass, field
 from typing import Callable
 
-from salt_agent.security import SecurityClassifier
+from salt_agent.security import SecurityClassifier, ai_classify_bash
 
 
 @dataclass
@@ -97,6 +97,30 @@ class PermissionSystem:
                 else:
                     return "allow", ""
         return "allow", ""
+
+    async def check_with_ai(self, tool_name: str, tool_input: dict, provider) -> tuple[str, str]:
+        """Check permissions with AI classifier for bash commands.
+
+        Runs the fast rules check first, then races the AI classifier for
+        bash commands.  The AI can escalate (allow->ask, ask->deny) but
+        never downgrade a hard deny.
+        """
+        # First: fast rules check
+        action, reason = self.check(tool_name, tool_input)
+        if action == "deny":
+            return action, reason  # hard deny always wins
+
+        # For bash: race AI classifier
+        if tool_name == "bash" and not self.auto_mode:
+            command = tool_input.get("command", "")
+            ai_action, ai_reason = await ai_classify_bash(command, provider)
+            # AI can escalate (allow->ask, ask->deny) but not downgrade (deny->allow)
+            if ai_action == "deny":
+                return "deny", ai_reason
+            if ai_action == "ask" and action == "allow":
+                return "ask", ai_reason
+
+        return action, reason
 
     def _matches(
         self,

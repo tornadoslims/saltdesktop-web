@@ -6,10 +6,12 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from salt_agent.compaction import (
+    CompactionCache,
     context_collapse,
     estimate_tokens,
     estimate_messages_tokens,
     history_snip,
+    microcompact_tool_results,
     needs_compaction,
     compact_context,
 )
@@ -417,3 +419,114 @@ class TestContextCollapse:
         ]
         result = context_collapse(msgs, context_window=100)
         assert len(result) == 4  # no tool pairs, nothing to collapse
+
+
+class TestCompactionCache:
+    def test_cache_skips_already_compacted(self):
+        """Cached indices should not be re-processed."""
+        cache = CompactionCache()
+        msgs = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "t1", "content": "x" * 10000},
+                ],
+            },
+            {"role": "user", "content": "recent1"},
+            {"role": "user", "content": "recent2"},
+            {"role": "user", "content": "recent3"},
+            {"role": "user", "content": "recent4"},
+            {"role": "user", "content": "recent5"},
+            {"role": "user", "content": "recent6"},
+        ]
+        # First call compacts index 0
+        result = cache.microcompact_with_cache(msgs)
+        assert "[...truncated...]" in result[0]["content"][0]["content"]
+        original_content = result[0]["content"][0]["content"]
+
+        # Second call should skip index 0 (already in cache)
+        result2 = cache.microcompact_with_cache(result)
+        assert result2[0]["content"][0]["content"] == original_content
+
+    def test_cache_processes_new_messages(self):
+        """New messages added after initial compaction should be processed."""
+        cache = CompactionCache()
+        msgs = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "t1", "content": "a" * 10000},
+                ],
+            },
+        ]
+        # Pad with recent messages so index 0 is in the compaction zone
+        for i in range(6):
+            msgs.append({"role": "user", "content": f"recent{i}"})
+
+        cache.microcompact_with_cache(msgs)
+        assert 0 in cache._compacted_indices
+
+        # Add a new message at index 1 that needs compaction
+        msgs.insert(1, {
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": "t2", "content": "b" * 10000},
+            ],
+        })
+
+        cache.microcompact_with_cache(msgs)
+        assert 1 in cache._compacted_indices
+
+    def test_invalidate_clears_cache(self):
+        cache = CompactionCache()
+        cache._compacted_indices.add(0)
+        cache._compacted_indices.add(1)
+        cache.invalidate()
+        assert len(cache._compacted_indices) == 0
+
+    def test_cache_matches_uncached_behavior(self):
+        """Cached microcompact should produce the same result as uncached."""
+        import copy
+        msgs_a = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "t1", "content": "z" * 10000},
+                ],
+            },
+        ]
+        for i in range(6):
+            msgs_a.append({"role": "user", "content": f"msg{i}"})
+
+        msgs_b = copy.deepcopy(msgs_a)
+
+        # Uncached
+        microcompact_tool_results(msgs_a)
+
+        # Cached
+        cache = CompactionCache()
+        cache.microcompact_with_cache(msgs_b)
+
+        # Results should match
+        assert msgs_a[0]["content"][0]["content"] == msgs_b[0]["content"][0]["content"]
+
+    def test_cache_empty_messages(self):
+        """Cache should handle empty message list gracefully."""
+        cache = CompactionCache()
+        result = cache.microcompact_with_cache([])
+        assert result == []
+
+    def test_cache_no_tool_results(self):
+        """Messages without tool_result blocks should still be cached (no-op)."""
+        cache = CompactionCache()
+        msgs = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "world"},
+        ]
+        for i in range(6):
+            msgs.append({"role": "user", "content": f"pad{i}"})
+
+        result = cache.microcompact_with_cache(msgs)
+        # Indices should be marked as processed even though no truncation happened
+        assert 0 in cache._compacted_indices
+        assert 1 in cache._compacted_indices
