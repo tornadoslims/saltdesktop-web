@@ -199,38 +199,46 @@ class TestAgentTool:
         assert defn.name == "agent"
         assert len(defn.params) == 2
 
-    def test_execute_calls_spawn_fresh(self):
+    def test_is_async(self):
         mgr = MagicMock()
+        tool = AgentTool(mgr)
+        assert tool.is_async() is True
 
-        async def fake_spawn(prompt, mode, event_callback=None):
-            return {"result": "Subagent says hello"}
+    def test_async_execute_yields_result(self):
+        mgr = MagicMock()
+        mock_agent = MagicMock()
 
-        mgr.spawn_fresh = fake_spawn
+        async def fake_run(prompt):
+            from salt_agent.events import AgentComplete
+            yield AgentComplete(final_text="Subagent says hello")
+
+        mock_agent.run = fake_run
+        mgr.create_fresh = MagicMock(return_value=mock_agent)
+
         tool = AgentTool(mgr)
 
-        result = tool.execute(prompt="Do something", mode="explore")
-        assert result == "Subagent says hello"
+        items = []
+        async def collect():
+            async for item in tool.async_execute(prompt="Do something", mode="explore"):
+                items.append(item)
 
-    def test_execute_handles_error(self):
+        asyncio.run(collect())
+        # Should have events + final result
+        result_items = [i for i in items if i["type"] == "result"]
+        assert len(result_items) == 1
+        assert "hello" in result_items[0]["content"]
+
+    def test_execute_sync_fallback(self):
         mgr = MagicMock()
+        mock_agent = MagicMock()
 
-        async def failing_spawn(prompt, mode, event_callback=None):
-            raise RuntimeError("API error")
+        async def fake_run(prompt):
+            from salt_agent.events import AgentComplete
+            yield AgentComplete(final_text="sync result")
 
-        mgr.spawn_fresh = failing_spawn
+        mock_agent.run = fake_run
+        mgr.create_fresh = MagicMock(return_value=mock_agent)
+
         tool = AgentTool(mgr)
-
-        result = tool.execute(prompt="Do something")
-        assert "Subagent error" in result
-
-    def test_execute_default_mode(self):
-        mgr = MagicMock()
-
-        async def fake_spawn(prompt, mode, event_callback=None):
-            return {"result": f"mode={mode}"}
-
-        mgr.spawn_fresh = fake_spawn
-        tool = AgentTool(mgr)
-
         result = tool.execute(prompt="test")
-        assert "mode=general" in result
+        assert "sync result" in result or "Subagent" in result

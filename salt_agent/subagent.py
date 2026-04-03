@@ -1,4 +1,8 @@
-"""Subagent system -- spawn fresh or forked child agents."""
+"""Subagent system -- spawn fresh or forked child agents.
+
+The manager creates child agents; the caller (AgentTool.async_execute) runs
+them and yields their events into the parent's stream.
+"""
 
 from __future__ import annotations
 
@@ -40,20 +44,13 @@ class SubagentManager:
         self.parent = parent_agent
         self.children: list[dict] = []
 
-    async def spawn_fresh(
-        self,
-        prompt: str,
-        mode: str = "general",
-        max_turns: int = 15,
-        event_callback=None,
-    ) -> dict:
-        """Spawn a fresh subagent with zero context.
+    # -- Factory methods (create agents, caller runs them) -------------------
+
+    def create_fresh(self, mode: str = "general", max_turns: int = 15) -> SaltAgent:
+        """Create a fresh subagent with zero context. Caller runs it.
 
         Use for exploration, verification, or focused tasks that don't need
         the parent's conversation history.
-
-        If *event_callback* is provided, every intermediate event from the
-        child agent will be forwarded to it so the CLI can display activity.
         """
         factory = _get_create_agent()
         child = factory(
@@ -65,8 +62,48 @@ class SubagentManager:
             max_turns=max_turns,
             persist=False,
         )
+        return child
 
-        result_text = await _run_agent(child, prompt, event_callback=event_callback)
+    def create_fork(self, max_turns: int = 15) -> SaltAgent:
+        """Create a fork that inherits parent context. Caller runs it.
+
+        Prompt cache prefix sharing: the child uses the EXACT same system
+        prompt and tool definitions as the parent, byte-for-byte.  This
+        ensures Anthropic's prompt cache gives cache hits on the shared prefix.
+        """
+        factory = _get_create_agent()
+        child = factory(
+            provider=self.parent.config.provider,
+            model=self.parent.config.model,
+            api_key=self.parent.config.api_key,
+            working_directory=self.parent.config.working_directory,
+            system_prompt=self.parent.context.system_prompt,
+            max_turns=max_turns,
+            persist=False,
+        )
+        # Share the SAME tool registry (identical tool definitions for cache prefix)
+        child.tools = self.parent.tools
+        # Copy parent's conversation messages exactly (deep copy for isolation)
+        child._conversation_messages = [
+            dict(m) for m in self.parent._conversation_messages
+        ]
+        return child
+
+    # -- Legacy async helpers (kept for backward compat / direct use) --------
+
+    async def spawn_fresh(
+        self,
+        prompt: str,
+        mode: str = "general",
+        max_turns: int = 15,
+    ) -> dict:
+        """Spawn a fresh subagent and run it to completion.
+
+        Returns a record dict with type, mode, prompt, result.
+        This is the legacy API -- new code should use create_fresh() + run().
+        """
+        child = self.create_fresh(mode=mode, max_turns=max_turns)
+        result_text = await _run_agent(child, prompt)
 
         child_record = {
             "type": "fresh",
@@ -85,35 +122,13 @@ class SubagentManager:
     ) -> dict:
         """Fork: child inherits parent's conversation context.
 
-        Use for parallel work on the same codebase where the child needs
-        awareness of what has been discussed/done so far.
-
-        Prompt cache prefix sharing: the child uses the EXACT same system prompt
-        and tool definitions as the parent, byte-for-byte. This ensures Anthropic's
-        prompt cache gives cache hits on the shared prefix.
+        Returns a record dict with type, mode, prompt, result.
+        This is the legacy API -- new code should use create_fork() + run().
         """
-        factory = _get_create_agent()
-        # Use the exact same system prompt (byte-identical for cache hits)
-        child = factory(
-            provider=self.parent.config.provider,
-            model=self.parent.config.model,
-            api_key=self.parent.config.api_key,
-            working_directory=self.parent.config.working_directory,
-            system_prompt=self.parent.context.system_prompt,
-            max_turns=max_turns,
-            persist=False,
-        )
-
-        # Share the SAME tool registry (identical tool definitions for cache prefix)
-        child.tools = self.parent.tools
-
-        # Copy parent's conversation messages exactly (deep copy for isolation)
-        if messages:
+        child = self.create_fork(max_turns=max_turns)
+        # Override messages if explicitly provided
+        if messages is not None:
             child._conversation_messages = [dict(m) for m in messages]
-        else:
-            child._conversation_messages = [
-                dict(m) for m in self.parent._conversation_messages
-            ]
 
         result_text = await _run_agent(child, _FORK_BOILERPLATE + "\n\n" + prompt)
 
@@ -127,26 +142,15 @@ class SubagentManager:
         return child_record
 
 
-async def _run_agent(agent, prompt: str, event_callback=None) -> str:
-    """Run an agent to completion and collect the final text.
-
-    If *event_callback* is provided, every event is forwarded to it so the
-    caller (typically the CLI) can render subagent activity in real time.
-    """
+async def _run_agent(agent, prompt: str) -> str:
+    """Run an agent to completion and collect the final text."""
     from salt_agent.events import AgentComplete, TextChunk
 
     result_text = ""
     async for event in agent.run(prompt):
-        # Forward intermediate events to the callback (if any)
-        if event_callback is not None:
-            try:
-                event_callback(event)
-            except Exception:
-                pass  # Never let a display callback break the agent
         if isinstance(event, AgentComplete):
             result_text = event.final_text
         elif isinstance(event, TextChunk):
-            # Accumulate in case AgentComplete is not emitted
             result_text += event.text
     return result_text
 

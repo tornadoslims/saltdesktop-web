@@ -534,10 +534,19 @@ class SaltAgent:
                 })
             messages.append({"role": "assistant", "content": assistant_content})
 
-            # Execute tools -- parallel when safe, sequential otherwise
+            # Execute tools -- async tools yield events, parallel when safe, sequential otherwise
             tool_results: list[dict] = []
+
+            # Check if any tool in this batch is async (e.g. agent tool)
+            has_async_tool = any(
+                (t := self.tools.get(tu.tool_name)) and t.is_async()
+                for tu in tool_uses
+            )
+
+            # Async tools force sequential execution (they yield events)
             parallel_safe = (
                 len(tool_uses) > 1
+                and not has_async_tool
                 and all(tu.tool_name in PARALLEL_SAFE_TOOLS for tu in tool_uses)
             )
 
@@ -609,7 +618,7 @@ class SaltAgent:
                         "content": result,
                     })
             else:
-                # --- Sequential execution path ---
+                # --- Sequential execution path (handles both sync and async tools) ---
                 for tu in tool_uses:
                     # Fire pre_tool_use hook -- can block
                     hook_result = await self.hooks.fire_async("pre_tool_use", {
@@ -637,7 +646,34 @@ class SaltAgent:
                     tools_used.append(tu.tool_name)
 
                     tool = self.tools.get(tu.tool_name)
-                    if tool:
+                    if tool and tool.is_async():
+                        # --- Async tool path: yield events from the generator ---
+                        result = ""
+                        success = True
+                        try:
+                            async for item in tool.async_execute(**tu.tool_input):
+                                if item["type"] == "event":
+                                    # Forward subagent/child events to the parent's stream
+                                    yield item["event"]
+                                elif item["type"] == "result":
+                                    result = item["content"]
+                        except Exception as e:
+                            result = f"Error: {str(e)}"
+                            success = False
+
+                        if not result.startswith("Error"):
+                            success = True
+                        else:
+                            success = False
+
+                        yield ToolEnd(
+                            tool_name=tu.tool_name,
+                            result=result[:200],
+                            success=success,
+                        )
+
+                    elif tool:
+                        # --- Sync tool path: existing behavior ---
                         try:
                             result = tool.execute(**tu.tool_input)
                             success = True

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, AsyncIterator
 
 
 @dataclass
@@ -35,6 +35,22 @@ class Tool(ABC):
     def execute(self, **kwargs) -> str:
         """Execute the tool and return the result as a string."""
         ...
+
+    def is_async(self) -> bool:
+        """Override to True for tools that yield events (like the agent tool).
+
+        Async tools implement async_execute() which yields dicts with
+        ``{"type": "event", "event": <AgentEvent>}`` for intermediate events
+        and ``{"type": "result", "content": <str>}`` for the final tool result.
+        """
+        return False
+
+    async def async_execute(self, **kwargs) -> AsyncIterator[dict]:
+        """Async execution that can yield events. Override for streaming tools.
+
+        Default implementation wraps the sync execute() call.
+        """
+        yield {"type": "result", "content": self.execute(**kwargs)}
 
 
 class ToolRegistry:

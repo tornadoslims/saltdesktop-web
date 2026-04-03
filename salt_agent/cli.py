@@ -27,6 +27,8 @@ from salt_agent.config import AgentConfig
 from salt_agent.events import (
     AgentComplete,
     AgentError,
+    SubagentComplete,
+    SubagentSpawned,
     TextChunk,
     ToolEnd,
     ToolStart,
@@ -911,6 +913,14 @@ def _render_event(
         else:
             _write(f"\n{indent}  {_c(_RED, f'\u274c {event.error}')}\n")
 
+    elif isinstance(event, SubagentSpawned):
+        if spinner:
+            spinner.stop()
+        _write(f"\n{indent}    {_c(_DIM, f'-> Spawning {event.mode} subagent...')}\n")
+
+    elif isinstance(event, SubagentComplete):
+        _write(f"{indent}    {_c(_DIM, f'-> Subagent complete')}\n")
+
     elif isinstance(event, AgentComplete):
         if tracker:
             # Estimate tokens from text length (rough heuristic when not provided by API)
@@ -1112,23 +1122,6 @@ async def _interactive(
 
     agent.hooks.on("pre_tool_use", _diff_preview_hook)
 
-    # --- Wire up subagent event forwarding ---
-    agent_tool = agent.tools.get("agent")
-    if agent_tool is not None:
-        def _subagent_event_handler(event):
-            """Render subagent events indented under the parent's tool line."""
-            _render_event(
-                event,
-                verbose=verbose,
-                spinner=None,   # subagent manages its own spinner
-                tracker=None,
-                text_started=[True],
-                tool_count=[0],
-                last_tool_input={},
-                indent="    ",
-            )
-        agent_tool._event_callback = _subagent_event_handler
-
     # Print banner
     tool_names = sorted(agent.tools.names())
     mcp_servers = agent.mcp_manager.server_names if agent.mcp_manager and agent.mcp_manager.is_started else None
@@ -1158,12 +1151,7 @@ async def _interactive(
             _write(f"\n{_c(_DIM, 'Goodbye!')}\n")
             return
         except KeyboardInterrupt:
-            now = time.monotonic()
-            if now - _last_interrupt < 1.0:
-                _write(f"\n{_c(_DIM, 'Goodbye!')}\n")
-                return
-            _last_interrupt = now
-            _write(f"\n  {_c(_DIM, 'Press Ctrl+C again to exit.')}\n")
+            _write("\n")  # Clear the ^C, show fresh prompt (like Claude Code)
             continue
 
         # Multi-line support: lines ending with backslash
