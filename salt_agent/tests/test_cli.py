@@ -529,12 +529,12 @@ class TestPersistentHistory:
     def test_history_file_path(self):
         from salt_agent.cli import HISTORY_FILE
         assert HISTORY_FILE.name == "history"
-        assert ".salt-agent" in str(HISTORY_FILE)
+        assert ".s_code" in str(HISTORY_FILE)
 
     def test_setup_readline_creates_dir(self, tmp_path, monkeypatch):
         from salt_agent.cli import _setup_readline, HISTORY_FILE
         # Monkeypatch HISTORY_FILE to use tmp_path
-        fake_history = tmp_path / "salt-agent-test" / "history"
+        fake_history = tmp_path / "s_code-test" / "history"
         import salt_agent.cli as cli_mod
         monkeypatch.setattr(cli_mod, "HISTORY_FILE", fake_history)
         # _setup_readline should create the parent dir

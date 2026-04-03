@@ -3,10 +3,10 @@
 SaltAgent CLI — a polished terminal interface for SaltAgent.
 
 Usage:
-    salt-agent "Create a hello world script"
-    salt-agent -p openai -m gpt-4o-mini "Build a web scraper"
-    salt-agent -i  # interactive mode
-    salt-agent --help
+    s_code "Create a hello world script"
+    s_code -p openai -m gpt-4o-mini "Build a web scraper"
+    s_code -i  # interactive mode
+    s_code --help
 """
 
 from __future__ import annotations
@@ -44,6 +44,42 @@ from salt_agent.events import (
 )
 
 __version__ = "0.1.0"
+
+# ---------------------------------------------------------------------------
+# Config file support (~/.s_code/config.json)
+# ---------------------------------------------------------------------------
+S_CODE_DIR = Path.home() / ".s_code"
+S_CODE_CONFIG = S_CODE_DIR / "config.json"
+
+DEFAULT_CONFIG = {
+    "provider": "openai",
+    "model": "",
+    "auto_mode": False,
+    "show_suggestions": False,
+    "web_extractor": "trafilatura",
+    "max_turns": 30,
+    "temperature": 0.0,
+    "max_budget_usd": 0.0,
+}
+
+
+def _load_config() -> dict:
+    """Load config from ~/.s_code/config.json"""
+    if S_CODE_CONFIG.exists():
+        try:
+            with open(S_CODE_CONFIG) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def _save_config(config: dict):
+    """Save config to ~/.s_code/config.json"""
+    S_CODE_DIR.mkdir(parents=True, exist_ok=True)
+    with open(S_CODE_CONFIG, "w") as f:
+        json.dump(config, f, indent=2)
+
 
 # ---------------------------------------------------------------------------
 # ANSI escape codes
@@ -361,7 +397,7 @@ def _resolve_api_key(provider: str, explicit_key: str = "") -> str:
         if key:
             return key
 
-    for path in ["~/.openclaw/secrets.json", "~/.salt-agent/config.json"]:
+    for path in ["~/.openclaw/secrets.json", "~/.s_code/config.json"]:
         expanded = os.path.expanduser(path)
         if os.path.exists(expanded):
             try:
@@ -820,7 +856,7 @@ _SLASH_COMMANDS = {
 # Tab completion and persistent history
 # ---------------------------------------------------------------------------
 
-HISTORY_FILE = Path.home() / ".salt-agent" / "history"
+HISTORY_FILE = Path.home() / ".s_code" / "history"
 
 
 class SlashCompleter:
@@ -1501,8 +1537,16 @@ def _handle_slash_command(
 
     if command == "/config":
         config_parts = arg.split(None, 1) if arg else []
+        file_config = _load_config()
         if len(config_parts) == 0:
-            _write(f"\n  {_c(_BOLD, 'Configuration')}\n\n")
+            _write(f"\n  {_c(_BOLD, 'Configuration')} {_c(_DIM, f'(~/.s_code/config.json)')}\n\n")
+            # Show file config merged with defaults
+            merged = {**DEFAULT_CONFIG, **file_config}
+            for key in sorted(merged):
+                val = merged[key]
+                source = "file" if key in file_config else "default"
+                _write(f"  {_c(_CYAN, key)}: {val} {_c(_DIM, f'({source})')}\n")
+            _write(f"\n  {_c(_DIM, 'Runtime overrides (from CLI args):')}\n")
             for key in sorted(vars(agent.config)):
                 if key.startswith("_") or key == "api_key":
                     continue
@@ -1511,22 +1555,40 @@ def _handle_slash_command(
             _write("\n")
         elif len(config_parts) == 1:
             key = config_parts[0]
-            val = getattr(agent.config, key, None)
-            if val is not None:
-                _write(f"\n  {key} = {val}\n\n")
+            # Check file config first, then agent config
+            if key in file_config:
+                _write(f"\n  {key} = {file_config[key]} {_c(_DIM, '(from file)')}\n\n")
             else:
-                _write(f"\n  {_c(_RED, f'Unknown config key: {key}')}\n\n")
+                val = getattr(agent.config, key, None)
+                if val is not None:
+                    _write(f"\n  {key} = {val}\n\n")
+                else:
+                    _write(f"\n  {_c(_RED, f'Unknown config key: {key}')}\n\n")
         else:
             key, value = config_parts
-            if hasattr(agent.config, key) and not key.startswith("_") and key != "api_key":
-                old = getattr(agent.config, key)
-                if isinstance(old, bool):
-                    setattr(agent.config, key, value.lower() in ("true", "1", "yes"))
-                elif isinstance(old, int):
-                    setattr(agent.config, key, int(value))
+            # Persist to file and update runtime config
+            if key in DEFAULT_CONFIG or (hasattr(agent.config, key) and not key.startswith("_") and key != "api_key"):
+                # Type-coerce based on DEFAULT_CONFIG or agent config
+                if key in DEFAULT_CONFIG:
+                    ref = DEFAULT_CONFIG[key]
+                elif hasattr(agent.config, key):
+                    ref = getattr(agent.config, key)
                 else:
-                    setattr(agent.config, key, value)
-                _write(f"\n  {key} = {getattr(agent.config, key)}\n\n")
+                    ref = value
+                if isinstance(ref, bool):
+                    typed_value = value.lower() in ("true", "1", "yes")
+                elif isinstance(ref, int):
+                    typed_value = int(value)
+                elif isinstance(ref, float):
+                    typed_value = float(value)
+                else:
+                    typed_value = value
+                file_config[key] = typed_value
+                _save_config(file_config)
+                # Also update runtime config if applicable
+                if hasattr(agent.config, key) and not key.startswith("_") and key != "api_key":
+                    setattr(agent.config, key, typed_value)
+                _write(f"\n  {key} = {typed_value} {_c(_DIM, '(saved to ~/.s_code/config.json)')}\n\n")
             else:
                 _write(f"\n  {_c(_RED, f'Cannot set: {key}')}\n\n")
         return True
@@ -1579,13 +1641,13 @@ def _handle_slash_command(
 
     # --- Development commands ---
     if command == "/init":
-        init_dir = Path(agent.config.working_directory) / ".salt-agent"
+        init_dir = Path(agent.config.working_directory) / ".s_code"
         if init_dir.exists():
-            _write(f"\n  {_c(_DIM, 'Already initialized (.salt-agent/ exists).')}\n\n")
+            _write(f"\n  {_c(_DIM, 'Already initialized (.s_code/ exists).')}\n\n")
         else:
             init_dir.mkdir(parents=True)
             (init_dir / "config.json").write_text("{}\n")
-            _write(f"\n  {_c(_GREEN, 'Initialized .salt-agent/ in current directory.')}\n\n")
+            _write(f"\n  {_c(_GREEN, 'Initialized .s_code/ in current directory.')}\n\n")
         return True
 
     if command == "/scaffold":
@@ -2014,7 +2076,7 @@ def _handle_slash_command(
         _write(f"  {_c(_DIM, 'Model:')} {model}\n")
         _write(f"  {_c(_DIM, 'Tools:')} {len(agent.tools.names())}\n")
         _write(f"  {_c(_DIM, 'Directory:')} {agent.config.working_directory}\n")
-        _write(f"\n  {_c(_DIM, 'https://github.com/salt-agent/salt-agent')}\n\n")
+        _write(f"\n  {_c(_DIM, 'https://github.com/salt-agent/s_code')}\n\n")
         return True
 
     if command == "/changelog":
@@ -2729,14 +2791,14 @@ async def _interactive(
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="salt-agent",
+        prog="s_code",
         description="SaltAgent -- a general-purpose AI agent for the terminal.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""examples:
-  salt-agent "Create a hello world script"
-  salt-agent -p openai -m gpt-4o-mini "Build a REST API"
-  salt-agent -i                            # interactive mode
-  salt-agent -i -d ~/projects/myapp        # interactive in a specific directory
+  s_code "Create a hello world script"
+  s_code -p openai -m gpt-4o-mini "Build a REST API"
+  s_code -i                            # interactive mode
+  s_code -i -d ~/projects/myapp        # interactive in a specific directory
 """,
     )
     parser.add_argument(
@@ -2855,7 +2917,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-v", "--version",
         action="version",
-        version=f"salt-agent {__version__}",
+        version=f"s_code {__version__}",
     )
     return parser
 
@@ -2877,37 +2939,62 @@ def main(argv: list[str] | None = None) -> None:
     if not args.interactive and args.prompt is None:
         args.interactive = True
 
-    api_key = _resolve_api_key(args.provider, args.api_key)
+    # Load file config — CLI args take precedence
+    file_config = _load_config()
+
+    # Merge: CLI args override file config, file config overrides defaults
+    provider = args.provider if args.provider != "openai" else file_config.get("provider", "openai")
+    # If the user explicitly passed -p, use that; otherwise fall back to file config
+    # argparse default is "openai", so we check if it was explicitly provided
+    if any(a in (sys.argv or []) for a in ["-p", "--provider"]):
+        provider = args.provider
+    model = args.model or file_config.get("model", "")
+    web_extractor = args.web_extractor if args.web_extractor != "trafilatura" else file_config.get("web_extractor", "trafilatura")
+    if any(a in (sys.argv or []) for a in ["--web-extractor"]):
+        web_extractor = args.web_extractor
+    max_turns = args.max_turns if args.max_turns != 30 else file_config.get("max_turns", 30)
+    if any(a in (sys.argv or []) for a in ["--max-turns"]):
+        max_turns = args.max_turns
+    auto_mode = args.auto or file_config.get("auto_mode", False)
+    show_suggestions = args.suggestions or file_config.get("show_suggestions", False)
+
+    api_key = _resolve_api_key(provider, args.api_key)
     if not api_key:
-        env_var = "ANTHROPIC_API_KEY" if args.provider == "anthropic" else "OPENAI_API_KEY"
+        env_var = "ANTHROPIC_API_KEY" if provider == "anthropic" else "OPENAI_API_KEY"
         _write(
-            f"\n  {_c(_RED, 'Error:')} No API key found for provider '{args.provider}'.\n"
-            f"  Set {env_var}, pass --api-key, or add {args.provider}_key to "
+            f"\n  {_c(_RED, 'Error:')} No API key found for provider '{provider}'.\n"
+            f"  Set {env_var}, pass --api-key, or add {provider}_key to "
             f"~/.openclaw/secrets.json\n\n"
         )
         sys.exit(1)
 
     config = AgentConfig(
-        provider=args.provider,
-        model=args.model,
+        provider=provider,
+        model=model,
         api_key=api_key,
-        max_turns=args.max_turns,
+        max_turns=max_turns,
         working_directory=os.path.abspath(args.directory),
         system_prompt=args.system,
-        web_extractor=args.web_extractor,
-        auto_mode=args.auto,
+        web_extractor=web_extractor,
+        auto_mode=auto_mode,
         fallback_model=args.fallback_model,
         enable_mcp=not args.no_mcp,
         coordinator_mode=args.coordinator,
     )
 
-    # --suggestions: enable follow-up suggestions
-    if args.suggestions:
+    # File config / CLI override for suggestions
+    if show_suggestions:
         config.show_suggestions = True
 
-    # --max-budget-usd: set budget limit
+    # --max-budget-usd: set budget limit (CLI > file config > default)
     if args.max_budget_usd is not None:
         config.max_budget_usd = args.max_budget_usd
+    elif "max_budget_usd" in file_config:
+        config.max_budget_usd = float(file_config["max_budget_usd"])
+
+    # File config for temperature
+    if "temperature" in file_config:
+        config.temperature = float(file_config["temperature"])
 
     # --no-session-persistence: disable persistence
     if args.no_session_persistence:

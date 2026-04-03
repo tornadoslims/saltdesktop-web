@@ -25,7 +25,7 @@ class FileHistory:
     ) -> None:
         self.session_id = session_id
         self.backup_dir = (
-            Path(backup_dir or "~/.salt-agent/snapshots").expanduser() / session_id
+            Path(backup_dir or "~/.s_code/snapshots").expanduser() / session_id
         )
         self.backup_dir.mkdir(parents=True, exist_ok=True)
         self._snapshots: list[dict] = []

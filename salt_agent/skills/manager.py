@@ -36,7 +36,7 @@ class SkillManager:
     SKILL_DIRS = [
         Path.cwd() / "skills",               # workspace skills (highest priority)
         Path.cwd() / ".skills",              # hidden workspace skills
-        Path.home() / ".salt-agent" / "skills",  # user skills
+        Path.home() / ".s_code" / "skills",  # user skills
     ]
 
     def __init__(self, extra_dirs: list[str] | None = None) -> None:

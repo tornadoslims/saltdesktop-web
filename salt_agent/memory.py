@@ -46,7 +46,7 @@ class MemorySystem:
         memory_dir: str | None = None,
     ):
         self.working_dir = Path(working_directory)
-        self.memory_dir = Path(memory_dir or "~/.salt-agent/memory").expanduser()
+        self.memory_dir = Path(memory_dir or "~/.s_code/memory").expanduser()
 
     def load_project_instructions(self) -> str:
         """Find and load SALT.md / CLAUDE.md from working dir and parents.
