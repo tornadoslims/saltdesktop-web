@@ -83,8 +83,13 @@ class SubagentManager:
 
         Use for parallel work on the same codebase where the child needs
         awareness of what has been discussed/done so far.
+
+        Prompt cache prefix sharing: the child uses the EXACT same system prompt
+        and tool definitions as the parent, byte-for-byte. This ensures Anthropic's
+        prompt cache gives cache hits on the shared prefix.
         """
         factory = _get_create_agent()
+        # Use the exact same system prompt (byte-identical for cache hits)
         child = factory(
             provider=self.parent.config.provider,
             model=self.parent.config.model,
@@ -95,9 +100,16 @@ class SubagentManager:
             persist=False,
         )
 
-        # Inject parent messages as prior context (write to the correct attribute)
+        # Share the SAME tool registry (identical tool definitions for cache prefix)
+        child.tools = self.parent.tools
+
+        # Copy parent's conversation messages exactly (deep copy for isolation)
         if messages:
-            child._conversation_messages = list(messages)
+            child._conversation_messages = [dict(m) for m in messages]
+        else:
+            child._conversation_messages = [
+                dict(m) for m in self.parent._conversation_messages
+            ]
 
         result_text = await _run_agent(child, _FORK_BOILERPLATE + "\n\n" + prompt)
 
@@ -127,16 +139,15 @@ async def _run_agent(agent, prompt: str) -> str:
 
 def _mode_system_prompt(mode: str) -> str:
     """Return a system prompt tailored to the subagent mode."""
+    if mode == "verify":
+        from salt_agent.prompts.verification import VERIFICATION_PROMPT
+        return VERIFICATION_PROMPT
+
     prompts = {
         "explore": (
             "You are an exploration agent. Your job is to investigate codebases, "
             "read files, search for patterns, and report what you find. "
             "Be thorough but concise in your findings."
-        ),
-        "verify": (
-            "You are a verification agent. Your job is to check that code works "
-            "correctly by reading it, running tests, and validating behavior. "
-            "Report pass/fail with specific details."
         ),
         "worker": (
             "You are a worker agent. Your job is to complete a specific coding task: "

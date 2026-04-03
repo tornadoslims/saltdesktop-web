@@ -23,7 +23,10 @@ from salt_agent.memory import MemorySystem
 from salt_agent.permissions import PermissionRule, PermissionSystem
 from salt_agent.persistence import SessionPersistence
 from salt_agent.subagent import SubagentManager
+from salt_agent.plugins import PluginManager, SaltPlugin
+from salt_agent.security import SecurityClassifier
 from salt_agent.tools.base import Tool, ToolDefinition, ToolParam, ToolRegistry
+from salt_agent.tools.git import GitCommitTool, GitDiffTool, GitStatusTool
 from salt_agent.tools.todo import TodoWriteTool
 
 __all__ = [
@@ -53,6 +56,12 @@ __all__ = [
     "MemorySystem",
     "PermissionRule",
     "PermissionSystem",
+    "SecurityClassifier",
+    "PluginManager",
+    "SaltPlugin",
+    "GitStatusTool",
+    "GitDiffTool",
+    "GitCommitTool",
     "SessionPersistence",
     "needs_compaction",
     "compact_context",

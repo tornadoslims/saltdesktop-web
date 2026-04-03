@@ -15,11 +15,11 @@ class TestPermissionDefaults:
         assert action == "allow"
 
     def test_deny_rm_rf(self):
-        """rm -rf is denied."""
+        """rm -rf is denied (by security classifier or rule)."""
         ps = PermissionSystem()
         action, reason = ps.check("bash", {"command": "rm -rf /tmp/stuff"})
         assert action == "deny"
-        assert "Blocked" in reason
+        assert "Blocked" in reason or "Security classifier" in reason
 
     def test_deny_sudo(self):
         """sudo commands are denied."""
@@ -53,7 +53,7 @@ class TestPermissionAsk:
         ps = PermissionSystem(ask_callback=callback)
         action, reason = ps.check("bash", {"command": "pip install requests"})
         assert action == "allow"
-        assert reason == "User decision"
+        assert "user decision" in reason.lower() or reason == "User decision"
         callback.assert_called_once()
 
     def test_ask_pip_install_denied(self):
@@ -62,7 +62,7 @@ class TestPermissionAsk:
         ps = PermissionSystem(ask_callback=callback)
         action, reason = ps.check("bash", {"command": "pip install requests"})
         assert action == "deny"
-        assert reason == "User decision"
+        assert "user decision" in reason.lower() or reason == "User decision"
 
     def test_ask_chmod(self):
         """chmod asks for permission."""
@@ -151,10 +151,14 @@ class TestCustomRules:
         assert action == "deny"
 
     def test_empty_rules_allow_everything(self):
-        """Empty rules list allows everything (no rules match)."""
+        """Empty rules list allows safe commands (security classifier still active)."""
         ps = PermissionSystem(rules=[])
-        action, _ = ps.check("bash", {"command": "rm -rf /"})
+        # Safe command should still be allowed with empty rules
+        action, _ = ps.check("bash", {"command": "echo hello"})
         assert action == "allow"
+        # Dangerous command is still caught by the security classifier
+        action, _ = ps.check("bash", {"command": "rm -rf /"})
+        assert action == "deny"
 
     def test_first_matching_rule_wins(self):
         """First matching rule determines the outcome."""

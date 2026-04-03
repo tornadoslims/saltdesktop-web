@@ -41,7 +41,7 @@ class TestSubagentManager:
         mock_agent.run = fake_run
 
         with patch("salt_agent.subagent._get_create_agent", return_value=lambda **kw: mock_agent):
-            result = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.run(
                 mgr.spawn_fresh("Do something", mode="explore")
             )
 
@@ -65,7 +65,7 @@ class TestSubagentManager:
         mock_agent.run = fake_run
 
         with patch("salt_agent.subagent._get_create_agent", return_value=lambda **kw: mock_agent):
-            result = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.run(
                 mgr.fork("Continue work", messages=[{"role": "user", "content": "hello"}])
             )
 
@@ -87,7 +87,7 @@ class TestSubagentManager:
 
         long_prompt = "x" * 500
         with patch("salt_agent.subagent._get_create_agent", return_value=lambda **kw: mock_agent):
-            result = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.run(
                 mgr.spawn_fresh(long_prompt)
             )
 
@@ -107,7 +107,7 @@ class TestSubagentManager:
         mock_agent.run = fake_run
 
         with patch("salt_agent.subagent._get_create_agent", return_value=lambda **kw: mock_agent):
-            result = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.run(
                 mgr.spawn_fresh("test")
             )
 
@@ -126,9 +126,9 @@ class TestSubagentManager:
         mock_agent.run = fake_run
 
         with patch("salt_agent.subagent._get_create_agent", return_value=lambda **kw: mock_agent):
-            asyncio.get_event_loop().run_until_complete(mgr.spawn_fresh("task1"))
-            asyncio.get_event_loop().run_until_complete(mgr.spawn_fresh("task2"))
-            asyncio.get_event_loop().run_until_complete(
+            asyncio.run(mgr.spawn_fresh("task1"))
+            asyncio.run(mgr.spawn_fresh("task2"))
+            asyncio.run(
                 mgr.fork("task3", messages=[])
             )
 
@@ -167,7 +167,7 @@ class TestRunAgent:
 
         mock_agent.run = fake_run
 
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             _run_agent(mock_agent, "test")
         )
         assert result == "Final answer"
@@ -182,7 +182,7 @@ class TestRunAgent:
 
         mock_agent.run = fake_run
 
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             _run_agent(mock_agent, "test")
         )
         assert result == "Hello World"

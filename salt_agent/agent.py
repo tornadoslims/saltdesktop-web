@@ -73,6 +73,8 @@ class SaltAgent:
         self.permissions = PermissionSystem(
             rules=config.permission_rules,
             ask_callback=config.permission_ask_callback,
+            auto_mode=config.auto_mode,
+            plan_mode=config.plan_mode,
         )
         # Register permission hook
         self._register_permission_hook()
@@ -93,6 +95,30 @@ class SaltAgent:
         # Tools (after subagent_manager since AgentTool references it)
         self.tools = tools or self._default_tools()
 
+        # Plugin system
+        self.plugin_manager = None
+        if config.plugin_dirs:
+            from salt_agent.plugins import PluginManager
+            self.plugin_manager = PluginManager(plugin_dirs=config.plugin_dirs)
+            self.plugin_manager.discover()
+            # Register plugin tools
+            for tool in self.plugin_manager.get_tools():
+                self.tools.register(tool)
+            # Register plugin hooks
+            for event_name, callback in self.plugin_manager.get_hooks():
+                self.hooks.on(event_name, callback)
+
+        # MCP manager (lazy-started on first run)
+        self.mcp_manager = None
+        self._mcp_started = False
+        if config.enable_mcp:
+            try:
+                from salt_agent.mcp import MCPManager
+                mcp_dir = config.mcp_config_path or config.working_directory
+                self.mcp_manager = MCPManager(working_directory=mcp_dir)
+            except ImportError:
+                pass  # mcp package not installed
+
         # Persistent conversation history for interactive mode
         self._conversation_messages: list[dict] = []
 
@@ -102,10 +128,18 @@ class SaltAgent:
     def _create_provider(self) -> ProviderAdapter:
         if self.config.provider == "anthropic":
             from salt_agent.providers.anthropic import AnthropicAdapter
-            return AnthropicAdapter(api_key=self.config.api_key, model=self.config.model)
+            return AnthropicAdapter(
+                api_key=self.config.api_key,
+                model=self.config.model,
+                fallback_model=self.config.fallback_model,
+            )
         elif self.config.provider == "openai":
             from salt_agent.providers.openai_provider import OpenAIAdapter
-            return OpenAIAdapter(api_key=self.config.api_key, model=self.config.model)
+            return OpenAIAdapter(
+                api_key=self.config.api_key,
+                model=self.config.model,
+                fallback_model=self.config.fallback_model,
+            )
         else:
             raise ValueError(f"Unknown provider: {self.config.provider}")
 
@@ -173,6 +207,14 @@ class SaltAgent:
 
             registry.register(WebFetchTool(extractor=self.config.web_extractor))
             registry.register(WebSearchTool())
+
+        # Optional git tools
+        if self.config.include_git_tools:
+            from salt_agent.tools.git import GitCommitTool, GitDiffTool, GitStatusTool
+
+            registry.register(GitStatusTool(working_directory=wd))
+            registry.register(GitDiffTool(working_directory=wd))
+            registry.register(GitCommitTool(working_directory=wd))
 
         return registry
 
@@ -252,6 +294,14 @@ class SaltAgent:
         if todo_injection:
             dynamic_parts.append(todo_injection)
 
+        # Plan mode injection
+        if self.config.plan_mode:
+            dynamic_parts.append(
+                "You MUST create a plan using todo_write before taking any action. "
+                "List all steps you will take. Do NOT execute any tools other than "
+                "todo_write until the user types /approve."
+            )
+
         parts.append("\n".join(dynamic_parts))
 
         full_prompt = "\n\n".join(parts)
@@ -300,6 +350,18 @@ class SaltAgent:
         or accumulating), messages from previous run() calls are preserved so the
         agent maintains context across interactive turns.
         """
+        # Lazy-start MCP servers on first run
+        if self.mcp_manager and not self._mcp_started:
+            try:
+                mcp_tools = await self.mcp_manager.start_servers()
+                for tool in mcp_tools:
+                    self.tools.register(tool)
+                self._mcp_started = True
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning("MCP startup failed: %s", e)
+                self._mcp_started = True  # Don't retry on every run()
+
         # Append new user message to persistent conversation
         self._conversation_messages.append({"role": "user", "content": prompt})
 
@@ -631,6 +693,20 @@ class SaltAgent:
                         "tool_use_id": tu.tool_id,
                         "content": result,
                     })
+
+            # Inject pending images from ReadTool as multimodal content
+            read_tool = self.tools.get("read")
+            if read_tool and hasattr(read_tool, "_pending_images") and read_tool._pending_images:
+                for img in read_tool._pending_images:
+                    tool_results.append({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": img["media_type"],
+                            "data": img["base64_data"],
+                        },
+                    })
+                read_tool._pending_images.clear()
 
             messages.append({"role": "user", "content": tool_results})
 

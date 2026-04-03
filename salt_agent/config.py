@@ -34,3 +34,16 @@ class AgentConfig:
     # Web tools
     include_web_tools: bool = True  # Include WebFetch and WebSearch tools by default
     web_extractor: str = "trafilatura"  # "trafilatura", "readability", or "regex"
+    # Auto mode — skips all permission prompts
+    auto_mode: bool = False
+    # Model fallback — switch to this model when primary fails
+    fallback_model: str = ""
+    # Plan mode — agent must write a plan before executing tools
+    plan_mode: bool = False
+    # Git tools — register native git status/diff/commit tools
+    include_git_tools: bool = True
+    # Plugin directories — discover and load SaltPlugin subclasses from these dirs
+    plugin_dirs: list = field(default_factory=list)
+    # MCP (Model Context Protocol) — auto-discover and connect to MCP servers from .mcp.json
+    enable_mcp: bool = True
+    mcp_config_path: str = ""  # Override .mcp.json location (default: working_directory/.mcp.json)

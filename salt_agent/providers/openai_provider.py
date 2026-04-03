@@ -18,9 +18,10 @@ class OpenAIAdapter(ProviderAdapter):
 
     DEFAULT_MODEL = "gpt-4o"
 
-    def __init__(self, api_key: str = "", model: str = "") -> None:
+    def __init__(self, api_key: str = "", model: str = "", fallback_model: str = "") -> None:
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
         self.model = model or self.DEFAULT_MODEL
+        self.fallback_model = fallback_model
         self._client = None  # Lazy-init (avoids import error if openai not installed)
         # Last usage info from the API (populated after each successful call)
         self.last_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
@@ -71,12 +72,15 @@ class OpenAIAdapter(ProviderAdapter):
         if tools:
             kwargs["tools"] = tools
 
+        _all_retries_failed = False
+        _last_error = None
         for attempt in range(MAX_RETRIES):
             try:
                 async for event in self._do_stream(client, kwargs):
                     yield event
                 break  # Success
             except openai.RateLimitError as e:
+                _last_error = e
                 if attempt < MAX_RETRIES - 1:
                     wait = 2 ** attempt
                     yield AgentError(
@@ -85,11 +89,9 @@ class OpenAIAdapter(ProviderAdapter):
                     )
                     await asyncio.sleep(wait)
                 else:
-                    yield AgentError(
-                        error=f"OpenAI API error after {MAX_RETRIES} retries: {e}",
-                        recoverable=True,
-                    )
+                    _all_retries_failed = True
             except openai.APIConnectionError as e:
+                _last_error = e
                 if attempt < MAX_RETRIES - 1:
                     wait = 2 ** attempt
                     yield AgentError(
@@ -98,13 +100,33 @@ class OpenAIAdapter(ProviderAdapter):
                     )
                     await asyncio.sleep(wait)
                 else:
-                    yield AgentError(
-                        error=f"OpenAI connection error after {MAX_RETRIES} retries: {e}",
-                        recoverable=True,
-                    )
+                    _all_retries_failed = True
             except Exception as e:
-                yield AgentError(error=f"OpenAI API error: {e}", recoverable=True)
+                _last_error = e
+                _all_retries_failed = True
                 break
+
+        # Model fallback: if all retries failed and a fallback is configured
+        if _all_retries_failed and self.fallback_model:
+            yield AgentError(
+                error=f"Primary model failed. Falling back to {self.fallback_model}...",
+                recoverable=True,
+            )
+            fallback_kwargs = dict(kwargs)
+            fallback_kwargs["model"] = self.fallback_model
+            try:
+                async for event in self._do_stream(client, fallback_kwargs):
+                    yield event
+            except Exception as e2:
+                yield AgentError(
+                    error=f"Fallback model also failed: {e2}",
+                    recoverable=True,
+                )
+        elif _all_retries_failed:
+            yield AgentError(
+                error=f"OpenAI API error after {MAX_RETRIES} retries: {_last_error}",
+                recoverable=True,
+            )
 
     async def _do_stream(self, client, kwargs: dict) -> AsyncIterator[AgentEvent]:
         """Internal streaming implementation (separated for retry logic)."""

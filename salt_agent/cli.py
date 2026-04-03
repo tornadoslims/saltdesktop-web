@@ -555,14 +555,27 @@ def _format_time_ago(seconds: float) -> str:
     return f"{days}d ago"
 
 
-def _print_banner(config: AgentConfig, tool_names: list[str], session_info: dict | None = None) -> None:
+def _print_banner(
+    config: AgentConfig,
+    tool_names: list[str],
+    session_info: dict | None = None,
+    mcp_servers: list[str] | None = None,
+) -> None:
     """Print the startup banner box."""
     home = os.path.expanduser("~")
     wd = os.path.abspath(config.working_directory)
     display_dir = wd.replace(home, "~") if wd.startswith(home) else wd
     model = config.model or "(default)"
     provider_display = f"{config.provider.capitalize()} ({model})"
-    tools_display = ", ".join(tool_names)
+
+    # Separate built-in and MCP tools for display
+    builtin_tools = [t for t in tool_names if not t.startswith("mcp__")]
+    mcp_tools = [t for t in tool_names if t.startswith("mcp__")]
+
+    if mcp_tools:
+        tools_display = f"{len(builtin_tools)} built-in + {len(mcp_tools)} from MCP"
+    else:
+        tools_display = ", ".join(tool_names)
 
     # Content lines as (display_text, visual_width) tuples
     # Emoji takes 2 terminal columns, so we track visual width separately
@@ -574,6 +587,10 @@ def _print_banner(config: AgentConfig, tool_names: list[str], session_info: dict
         (f"Directory: {display_dir}", None),
         (f"Tools: {tools_display}", None),
     ]
+
+    # MCP server names
+    if mcp_servers:
+        content_lines.append((f"MCP: {', '.join(mcp_servers)}", None))
 
     # Session resume indicator
     if session_info:
@@ -622,6 +639,11 @@ _SLASH_COMMANDS = {
     "/tools": "List available tools",
     "/cost": "Show token usage this session",
     "/history": "Show conversation summary",
+    "/auto": "Toggle auto mode (skip all permission prompts)",
+    "/plan": "Enable plan mode (agent must plan before acting)",
+    "/approve": "Approve plan and let agent proceed",
+    "/search": "Search past sessions: /search <query>",
+    "/verify": "Spawn verification specialist to review code",
     "/quit": "Exit",
 }
 
@@ -688,6 +710,69 @@ def _handle_slash_command(
 
     if command == "/history":
         _write(f"\n  {_c(_DIM, 'History summary not yet implemented.')}\n\n")
+        return True
+
+    if command == "/auto":
+        agent.config.auto_mode = not agent.config.auto_mode
+        agent.permissions.auto_mode = agent.config.auto_mode
+        status = "ON" if agent.config.auto_mode else "OFF"
+        color = _GREEN if agent.config.auto_mode else _RED
+        _write(f"\n  Auto mode: {_c(color, status)}\n\n")
+        return True
+
+    if command == "/plan":
+        agent.config.plan_mode = True
+        agent.permissions.plan_mode = True
+        _write(f"\n  {_c(_YELLOW, 'Plan mode enabled.')} Agent must use todo_write to plan.\n")
+        _write(f"  {_c(_DIM, 'Use /approve when ready to execute.')}\n\n")
+        return True
+
+    if command == "/approve":
+        agent.config.plan_mode = False
+        agent.permissions.plan_mode = False
+        _write(f"\n  {_c(_GREEN, 'Plan approved.')} Agent can now execute tools.\n\n")
+        return True
+
+    if command == "/search":
+        parts_local = cmd.strip().split(None, 1)
+        query = parts_local[1] if len(parts_local) > 1 else ""
+        if not query:
+            _write(f"\n  {_c(_DIM, 'Usage: /search <query>')}\n\n")
+            return True
+        if agent.persistence:
+            results = agent.persistence.search_sessions(query)
+            if results:
+                _write(f"\n  {_c(_BOLD, f'Search results for \"{query}\"')}\n\n")
+                for r in results:
+                    ts = r.get("timestamp", "")[:19]
+                    sid = r["session_id"][:12]
+                    _write(f"  {_c(_CYAN, sid)} {_c(_DIM, ts)} [{r['type']}]\n")
+                    preview = r["preview"][:120]
+                    if len(r["preview"]) > 120:
+                        preview += "..."
+                    _write(f"    {_c(_DIM, preview)}\n")
+            else:
+                _write(f"\n  {_c(_DIM, f'No results for \"{query}\"')}\n")
+            _write("\n")
+        else:
+            _write(f"\n  {_c(_DIM, 'Session persistence not enabled.')}\n\n")
+        return True
+
+    if command == "/verify":
+        _write(f"\n  {_c(_CYAN, 'Spawning verification specialist...')}\n")
+        try:
+            result = asyncio.run(
+                agent.subagent_manager.spawn_fresh(
+                    "Review all recent code changes. Run all tests. Report any issues, "
+                    "bugs, or missing test coverage.",
+                    mode="verify",
+                    max_turns=15,
+                )
+            )
+            output = result.get("result", "No findings.")
+            _write(f"\n{render_markdown(output)}\n\n")
+        except Exception as e:
+            _write(f"\n  {_c(_RED, f'Verification failed: {e}')}\n\n")
         return True
 
     return False
@@ -983,9 +1068,42 @@ async def _interactive(
         except Exception:
             pass  # Don't let persistence errors break startup
 
+    # Register diff preview hook for edit tools
+    def _diff_preview_hook(data: dict):
+        """Show a diff preview before edit/multi_edit and ask for confirmation."""
+        from salt_agent.hooks import HookResult
+        tool_name = data.get("tool_name", "")
+        tool_input = data.get("tool_input", {})
+        if tool_name in ("edit", "multi_edit") and not agent.config.auto_mode:
+            old = tool_input.get("old_string", "")
+            new = tool_input.get("new_string", "")
+            fp = tool_input.get("file_path", "")
+            if old and new:
+                _write(f"\n  {_c(_BOLD, f'Diff preview: {_abbreviate_path(fp)}')}\n")
+                for line in old.splitlines()[:5]:
+                    preview = line[:100]
+                    _write(f"  {_c(_RED, f'- {preview}')}\n")
+                if len(old.splitlines()) > 5:
+                    _write(f"  {_c(_RED, f'  ... ({len(old.splitlines())} lines)')}\n")
+                for line in new.splitlines()[:5]:
+                    preview = line[:100]
+                    _write(f"  {_c(_GREEN, f'+ {preview}')}\n")
+                if len(new.splitlines()) > 5:
+                    _write(f"  {_c(_GREEN, f'  ... ({len(new.splitlines())} lines)')}\n")
+                try:
+                    response = input("  Apply? [Y/n] ")
+                    if response.strip().lower() == "n":
+                        return HookResult(action="block", reason="User rejected edit")
+                except (EOFError, KeyboardInterrupt):
+                    return HookResult(action="block", reason="User cancelled")
+        return None
+
+    agent.hooks.on("pre_tool_use", _diff_preview_hook)
+
     # Print banner
     tool_names = sorted(agent.tools.names())
-    _print_banner(agent.config, tool_names, session_info=session_info)
+    mcp_servers = agent.mcp_manager.server_names if agent.mcp_manager and agent.mcp_manager.is_started else None
+    _print_banner(agent.config, tool_names, session_info=session_info, mcp_servers=mcp_servers)
 
     tracker = TokenTracker(model=agent.config.model)
 
@@ -1002,7 +1120,8 @@ async def _interactive(
 
     while True:
         try:
-            prompt_str = f"{_c(_CYAN, display_dir)} {_c(_DIM, '>')} " if _USE_COLOR else f"{display_dir} > "
+            auto_indicator = f" {_c(_YELLOW, 'AUTO')}" if agent.config.auto_mode else ""
+            prompt_str = f"{_c(_CYAN, display_dir)}{auto_indicator} {_c(_DIM, '>')} " if _USE_COLOR else f"{display_dir}{' AUTO' if agent.config.auto_mode else ''} > "
             line = input(prompt_str)
         except EOFError:
             _write(f"\n{_c(_DIM, 'Goodbye!')}\n")
@@ -1034,7 +1153,8 @@ async def _interactive(
         if line.startswith("/"):
             first_word = line.split()[0] if line.split() else line
             known_commands = set(_SLASH_COMMANDS.keys()) | {"/q", "/exit"}
-            if first_word in known_commands:
+            # /search takes an argument, match by prefix
+            if first_word in known_commands or first_word == "/search":
                 result = _handle_slash_command(line, agent, tracker, verbose)
                 if result is None:
                     _write(f"{_c(_DIM, 'Goodbye!')}\n")
@@ -1138,6 +1258,21 @@ def _build_parser() -> argparse.ArgumentParser:
         help="HTML content extraction method (default: trafilatura)",
     )
     parser.add_argument(
+        "--auto",
+        action="store_true",
+        help="Start in auto mode (skip all permission prompts)",
+    )
+    parser.add_argument(
+        "--fallback-model",
+        default="",
+        help="Fallback model when primary model fails (e.g., gpt-4o-mini)",
+    )
+    parser.add_argument(
+        "--no-mcp",
+        action="store_true",
+        help="Disable MCP server auto-discovery from .mcp.json",
+    )
+    parser.add_argument(
         "-v", "--version",
         action="version",
         version=f"salt-agent {__version__}",
@@ -1175,6 +1310,9 @@ def main(argv: list[str] | None = None) -> None:
         working_directory=os.path.abspath(args.directory),
         system_prompt=args.system,
         web_extractor=args.web_extractor,
+        auto_mode=args.auto,
+        fallback_model=args.fallback_model,
+        enable_mcp=not args.no_mcp,
     )
 
     from salt_agent.agent import SaltAgent

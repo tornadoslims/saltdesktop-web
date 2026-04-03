@@ -90,3 +90,29 @@ class SessionPersistence:
                     continue
                 entries.append(json.loads(line))
         return entries
+
+    def search_sessions(self, query: str, max_results: int = 10) -> list[dict]:
+        """Search all sessions for matching content."""
+        results = []
+        for session_file in sorted(
+            self.sessions_dir.glob("*.jsonl"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        ):
+            with open(session_file) as f:
+                for line_num, line in enumerate(f):
+                    if query.lower() in line.lower():
+                        try:
+                            entry = json.loads(line)
+                            results.append({
+                                "session_id": session_file.stem,
+                                "line": line_num,
+                                "type": entry.get("type", "?"),
+                                "preview": line.strip()[:200],
+                                "timestamp": entry.get("timestamp", ""),
+                            })
+                        except (json.JSONDecodeError, KeyError):
+                            pass
+                        if len(results) >= max_results:
+                            return results
+        return results

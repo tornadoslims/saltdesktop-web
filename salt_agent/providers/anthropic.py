@@ -27,9 +27,10 @@ class AnthropicAdapter(ProviderAdapter):
 
     DEFAULT_MODEL = "claude-sonnet-4-20250514"
 
-    def __init__(self, api_key: str = "", model: str = "") -> None:
+    def __init__(self, api_key: str = "", model: str = "", fallback_model: str = "") -> None:
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
         self.model = model or self.DEFAULT_MODEL
+        self.fallback_model = fallback_model
         self.client = anthropic.Anthropic(api_key=self.api_key)
         # Last usage info from the API (populated after each successful call)
         self.last_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
@@ -56,12 +57,15 @@ class AnthropicAdapter(ProviderAdapter):
         if tools:
             kwargs["tools"] = tools
 
+        _all_retries_failed = False
+        _last_error = None
         for attempt in range(MAX_RETRIES):
             try:
                 async for event in self._do_stream(kwargs):
                     yield event
                 break  # Success — exit retry loop
             except _RETRIABLE_ERRORS as e:
+                _last_error = e
                 if attempt < MAX_RETRIES - 1:
                     wait = 2 ** attempt  # 1, 2, 4 seconds
                     yield AgentError(
@@ -70,13 +74,33 @@ class AnthropicAdapter(ProviderAdapter):
                     )
                     await asyncio.sleep(wait)
                 else:
-                    yield AgentError(
-                        error=f"Anthropic API error after {MAX_RETRIES} retries: {e}",
-                        recoverable=True,
-                    )
+                    _all_retries_failed = True
             except Exception as e:
-                yield AgentError(error=f"Anthropic API error: {e}", recoverable=True)
+                _last_error = e
+                _all_retries_failed = True
                 break  # Non-retriable errors don't retry
+
+        # Model fallback: if all retries failed and a fallback is configured
+        if _all_retries_failed and self.fallback_model:
+            yield AgentError(
+                error=f"Primary model failed. Falling back to {self.fallback_model}...",
+                recoverable=True,
+            )
+            fallback_kwargs = dict(kwargs)
+            fallback_kwargs["model"] = self.fallback_model
+            try:
+                async for event in self._do_stream(fallback_kwargs):
+                    yield event
+            except Exception as e2:
+                yield AgentError(
+                    error=f"Fallback model also failed: {e2}",
+                    recoverable=True,
+                )
+        elif _all_retries_failed:
+            yield AgentError(
+                error=f"Anthropic API error after {MAX_RETRIES} retries: {_last_error}",
+                recoverable=True,
+            )
 
     async def _do_stream(self, kwargs: dict) -> AsyncIterator[AgentEvent]:
         """Internal streaming implementation (separated for retry logic)."""
