@@ -13,7 +13,7 @@ class SessionPersistence:
 
     def __init__(self, session_id: str | None = None, sessions_dir: str | None = None):
         self.session_id = session_id or str(uuid.uuid4())
-        self.sessions_dir = Path(sessions_dir or "~/.saltdesktop/sessions").expanduser()
+        self.sessions_dir = Path(sessions_dir or "~/.salt-agent/sessions").expanduser()
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         self._file = self.sessions_dir / f"{self.session_id}.jsonl"
 

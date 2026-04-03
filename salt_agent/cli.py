@@ -282,7 +282,7 @@ def _resolve_api_key(provider: str, explicit_key: str = "") -> str:
         if key:
             return key
 
-    for path in ["~/.openclaw/secrets.json", "~/.saltdesktop/config.json"]:
+    for path in ["~/.openclaw/secrets.json", "~/.salt-agent/config.json"]:
         expanded = os.path.expanduser(path)
         if os.path.exists(expanded):
             try:

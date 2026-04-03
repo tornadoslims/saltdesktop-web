@@ -1,6 +1,6 @@
 """
 Hook engine -- callbacks for tool execution, API calls, errors, and completion.
-Salt Desktop uses hooks to track agent progress in real-time.
+SaltAgent uses hooks to track agent progress and enforce permissions in real-time.
 """
 
 from __future__ import annotations

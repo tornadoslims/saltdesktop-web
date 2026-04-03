@@ -25,9 +25,9 @@ class AgentConfig:
     # Session persistence
     persist: bool = True
     session_id: str = ""  # auto-generated if empty
-    sessions_dir: str = ""  # default: ~/.saltdesktop/sessions
+    sessions_dir: str = ""  # default: ~/.salt-agent/sessions
     # Memory
-    memory_dir: str = ""  # default: ~/.saltdesktop/memory
+    memory_dir: str = ""  # default: ~/.salt-agent/memory
     # Permissions
     permission_rules: list | None = None  # list[PermissionRule] or None for defaults
     permission_ask_callback: object = None  # Callable or None

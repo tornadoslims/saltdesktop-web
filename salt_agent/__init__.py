@@ -1,4 +1,4 @@
-"""SaltAgent — Salt Desktop's general-purpose agent execution engine."""
+"""SaltAgent — a standalone CLI agent for autonomous coding tasks."""
 
 from salt_agent.agent import SaltAgent
 from salt_agent.config import AgentConfig
