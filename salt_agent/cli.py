@@ -694,22 +694,29 @@ def _print_banner(
 
     content_lines.append(("", 0))
 
+    # Rich ASCII art banner
     _write("\n")
-    _write(f"{_c(_DIM, '\u256d' + '\u2500' * BOX_WIDTH + '\u256e')}\n")
-    _write(f"{_c(_DIM, '\u2502')}{' ' * BOX_WIDTH}{_c(_DIM, '\u2502')}\n")
+    _write(f"  {_c(_CYAN + _BOLD, '███████╗ █████╗ ██╗  ████████╗')}\n")
+    _write(f"  {_c(_CYAN + _BOLD, '██╔════╝██╔══██╗██║  ╚══██╔══╝')}\n")
+    _write(f"  {_c(_CYAN + _BOLD, '███████╗███████║██║     ██║   ')}\n")
+    _write(f"  {_c(_CYAN + _BOLD, '╚════██║██╔══██║██║     ██║   ')}\n")
+    _write(f"  {_c(_CYAN + _BOLD, '███████║██║  ██║███████╗██║   ')}\n")
+    _write(f"  {_c(_CYAN + _BOLD, '╚══════╝╚═╝  ╚═╝╚══════╝╚═╝   ')}{_c(_DIM, f'v{__version__}')}\n")
+    _write("\n")
 
-    for text, vis_width in content_lines:
-        if not text:
-            _write(f"{_c(_DIM, '\u2502')}{' ' * BOX_WIDTH}{_c(_DIM, '\u2502')}\n")
-        else:
-            padding = max(BOX_WIDTH - vis_width - 2, 0)
-            display = text
-            if text.startswith("\U0001f9c2"):
-                display = _c(_BOLD, text)
-            _write(f"{_c(_DIM, '\u2502')}  {display}{' ' * padding}{_c(_DIM, '\u2502')}\n")
+    # Info lines below the ASCII art
+    _write(f"  {_c(_DIM, 'Provider:')} {provider_display}\n")
+    _write(f"  {_c(_DIM, 'Directory:')} {display_dir}\n")
 
-    _write(f"{_c(_DIM, '\u2502')}{' ' * BOX_WIDTH}{_c(_DIM, '\u2502')}\n")
-    _write(f"{_c(_DIM, '\u2570' + '\u2500' * BOX_WIDTH + '\u256f')}\n")
+    # Summary
+    _write(f"  {_c(_DIM, summary_line)}\n")
+
+    # Session resume
+    if session_info:
+        turns = session_info.get("turns", 0)
+        time_ago = session_info.get("time_ago", "")
+        _write(f"  {_c(_CYAN, f'\u21bb Resuming session ({turns} turns, {time_ago})')}\n")
+
     _write("\n")
 
 
