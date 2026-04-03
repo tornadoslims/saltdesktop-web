@@ -627,6 +627,11 @@ Router.register('mission', {
     });
     container.innerHTML = html;
     container.scrollTop = container.scrollHeight;
+
+    // If there are messages, trigger a preview to populate the draft graph
+    if ((data.messages || []).length >= 2) {
+      this._fetchPreview(m);
+    }
   },
 
   _initGraph(m, phase) {
