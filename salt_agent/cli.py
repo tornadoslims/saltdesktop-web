@@ -1227,20 +1227,74 @@ def _handle_slash_command(
         return True
 
     if command == "/model":
+        KNOWN_MODELS = {
+            "anthropic": [
+                "claude-opus-4-6", "claude-sonnet-4-6", "claude-sonnet-4-20250514",
+                "claude-haiku-4-5-20251001", "claude-opus-4-20250901",
+            ],
+            "openai": [
+                "gpt-5.4", "gpt-5.3", "gpt-4o", "gpt-4o-mini", "gpt-4.1",
+                "gpt-4.1-mini", "gpt-4.1-nano", "o4-mini", "o3",
+            ],
+            "gemini": [
+                "gemini-3.1-pro", "gemini-3-pro", "gemini-3-flash",
+                "gemini-2.5-pro", "gemini-2.5-flash",
+            ],
+        }
+        current_model = agent.config.model or _resolve_default_model(agent.config.provider)
+        provider_name = _capitalize_provider(agent.config.provider)
+        available = KNOWN_MODELS.get(agent.config.provider, [])
+
         if arg:
-            old_model = agent.config.model or _resolve_default_model(agent.config.provider)
+            # Validate against known models
+            if arg not in available:
+                # Check for partial match
+                matches = [m for m in available if arg.lower() in m.lower()]
+                if len(matches) == 1:
+                    arg = matches[0]  # auto-complete partial match
+                elif len(matches) > 1:
+                    _write(f"\n  Multiple matches for '{arg}':\n")
+                    for i, m in enumerate(matches, 1):
+                        _write(f"    {_c(_CYAN, str(i))}. {m}\n")
+                    try:
+                        choice = input(f"  Select (1-{len(matches)}): ").strip()
+                        if choice.isdigit() and 1 <= int(choice) <= len(matches):
+                            arg = matches[int(choice) - 1]
+                        else:
+                            _write(f"  {_c(_DIM, 'Cancelled.')}\n\n")
+                            return True
+                    except (EOFError, KeyboardInterrupt):
+                        _write(f"\n  {_c(_DIM, 'Cancelled.')}\n\n")
+                        return True
+                else:
+                    _write(f"\n  {_c(_YELLOW, f'Unknown model: {arg}')}\n")
+                    _write(f"  Available for {provider_name}:\n")
+                    for m in available:
+                        marker = _c(_CYAN, " *") if m == current_model else "  "
+                        _write(f"  {marker} {m}\n")
+                    _write(f"\n  Use the exact name, or switch provider with /provider\n\n")
+                    return True
+
+            old_model = current_model
             agent.config.model = arg
-            # Recreate the provider with the new model
             try:
                 agent.provider = agent._create_provider()
-                _write(f"\n  Model changed: {_c(_DIM, old_model)} -> {_c(_CYAN, arg)}\n\n")
+                _write(f"\n  Model changed: {_c(_DIM, old_model)} \u2192 {_c(_CYAN, arg)}\n\n")
             except Exception as e:
                 agent.config.model = old_model
                 _write(f"\n  {_c(_RED, f'Failed to switch model: {e}')}\n\n")
         else:
-            model = agent.config.model or _resolve_default_model(agent.config.provider)
-            provider_name = _capitalize_provider(agent.config.provider)
-            _write(f"\n  Provider: {_c(_CYAN, provider_name)}\n  Model: {_c(_CYAN, model)}\n\n")
+            # Show current model + available models
+            _write(f"\n  {_c(_DIM, 'Provider:')} {_c(_CYAN, provider_name)}\n")
+            _write(f"  {_c(_DIM, 'Model:')} {_c(_CYAN, current_model)}\n\n")
+            if available:
+                _write(f"  {_c(_DIM, f'Available {provider_name} models:')}\n")
+                for m in available:
+                    if m == current_model:
+                        _write(f"    {_c(_CYAN, '\u25cf')} {_c(_BOLD, m)} {_c(_DIM, '(active)')}\n")
+                    else:
+                        _write(f"    {_c(_DIM, '\u25cb')} {m}\n")
+                _write(f"\n  {_c(_DIM, 'Usage: /model <name>')}\n\n")
         return True
 
     if command == "/provider":
