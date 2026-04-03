@@ -33,3 +33,4 @@ class AgentConfig:
     permission_ask_callback: object = None  # Callable or None
     # Web tools
     include_web_tools: bool = True  # Include WebFetch and WebSearch tools by default
+    web_extractor: str = "trafilatura"  # "trafilatura", "readability", or "regex"

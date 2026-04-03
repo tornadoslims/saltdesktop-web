@@ -20,6 +20,19 @@ def _get_create_agent():
     return _create_agent
 
 
+_FORK_BOILERPLATE = (
+    "You are a forked worker process. Execute the task directly and efficiently. "
+    "Do NOT spawn sub-agents. Do NOT ask clarifying questions. "
+    "When done, report your result in this format:\n"
+    "**Scope:** What you were asked to do\n"
+    "**Result:** What you did (success/failure)\n"
+    "**Key files:** Files you read or examined\n"
+    "**Files changed:** Files you created or modified\n"
+    "**Issues:** Any problems encountered\n\n"
+    "Your task:"
+)
+
+
 class SubagentManager:
     """Manage child agents spawned from a parent agent."""
 
@@ -82,11 +95,11 @@ class SubagentManager:
             persist=False,
         )
 
-        # Inject parent messages as prior context
+        # Inject parent messages as prior context (write to the correct attribute)
         if messages:
-            child.context._messages = list(messages)
+            child._conversation_messages = list(messages)
 
-        result_text = await _run_agent(child, prompt)
+        result_text = await _run_agent(child, _FORK_BOILERPLATE + "\n\n" + prompt)
 
         child_record = {
             "type": "fork",

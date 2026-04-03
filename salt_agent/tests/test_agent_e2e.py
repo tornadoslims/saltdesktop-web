@@ -768,3 +768,132 @@ class TestE2ELongToolChain:
         assert len(completes) == 1
         assert completes[0].turns == 6
         assert f.read_text() == "2"
+
+
+class TestE2EParallelToolExecution:
+    """Parallel-safe tools should have all ToolStarts before any ToolEnd."""
+
+    def test_parallel_reads_event_ordering(self, tmp_path):
+        """Multiple read calls should execute in parallel: all starts before all ends."""
+        f1 = tmp_path / "x.txt"
+        f2 = tmp_path / "y.txt"
+        f3 = tmp_path / "z.txt"
+        f1.write_text("alpha")
+        f2.write_text("beta")
+        f3.write_text("gamma")
+
+        registry, read_tool, write_tool, edit_tool = _make_file_tools(tmp_path)
+
+        agent, provider = _make_agent(
+            responses=[
+                # Three reads in one turn -> parallel
+                [
+                    ToolUse(tool_id="t1", tool_name="read", tool_input={"file_path": str(f1)}),
+                    ToolUse(tool_id="t2", tool_name="read", tool_input={"file_path": str(f2)}),
+                    ToolUse(tool_id="t3", tool_name="read", tool_input={"file_path": str(f3)}),
+                ],
+                [TextChunk(text="Read all three.")],
+            ],
+            tools=registry,
+            working_directory=str(tmp_path),
+        )
+        events = _collect_events(agent, "Read three files")
+
+        # Extract just starts and ends
+        start_end = [e for e in events if isinstance(e, (ToolStart, ToolEnd))]
+        assert len(start_end) == 6  # 3 starts + 3 ends
+
+        # All ToolStarts must come before any ToolEnd (parallel pattern)
+        types = [type(e).__name__ for e in start_end]
+        assert types == ["ToolStart", "ToolStart", "ToolStart", "ToolEnd", "ToolEnd", "ToolEnd"]
+
+        # All succeeded
+        ends = [e for e in start_end if isinstance(e, ToolEnd)]
+        assert all(e.success for e in ends)
+
+    def test_sequential_for_write_tools(self, tmp_path):
+        """Write tools should always be sequential: Start/End pairs interleaved."""
+        f1 = tmp_path / "out1.txt"
+        f2 = tmp_path / "out2.txt"
+
+        registry, read_tool, write_tool, edit_tool = _make_file_tools(tmp_path)
+
+        agent, provider = _make_agent(
+            responses=[
+                # Two writes in one turn -> must be sequential
+                [
+                    ToolUse(tool_id="t1", tool_name="write", tool_input={
+                        "file_path": str(f1), "content": "file1",
+                    }),
+                    ToolUse(tool_id="t2", tool_name="write", tool_input={
+                        "file_path": str(f2), "content": "file2",
+                    }),
+                ],
+                [TextChunk(text="Wrote both.")],
+            ],
+            tools=registry,
+            working_directory=str(tmp_path),
+        )
+        events = _collect_events(agent, "Write two files")
+
+        # Extract starts and ends
+        start_end = [e for e in events if isinstance(e, (ToolStart, ToolEnd))]
+        assert len(start_end) == 4  # 2 starts + 2 ends
+
+        # Sequential: Start, End, Start, End (interleaved pairs)
+        types = [type(e).__name__ for e in start_end]
+        assert types == ["ToolStart", "ToolEnd", "ToolStart", "ToolEnd"]
+
+        # Both files written
+        assert f1.read_text() == "file1"
+        assert f2.read_text() == "file2"
+
+    def test_mixed_tools_stay_sequential(self, tmp_path):
+        """Mixed parallel-safe and unsafe tools should stay sequential."""
+        f1 = tmp_path / "data.txt"
+        f1.write_text("hello")
+
+        registry, read_tool, write_tool, edit_tool = _make_file_tools(tmp_path)
+        bash_tool = BashTool(timeout=10, working_directory=str(tmp_path))
+        registry.register(bash_tool)
+
+        agent, provider = _make_agent(
+            responses=[
+                # read + bash in one turn -> sequential (mixed)
+                [
+                    ToolUse(tool_id="t1", tool_name="read", tool_input={"file_path": str(f1)}),
+                    ToolUse(tool_id="t2", tool_name="bash", tool_input={"command": "echo hi"}),
+                ],
+                [TextChunk(text="Done.")],
+            ],
+            tools=registry,
+            working_directory=str(tmp_path),
+        )
+        events = _collect_events(agent, "Read and bash")
+
+        start_end = [e for e in events if isinstance(e, (ToolStart, ToolEnd))]
+        types = [type(e).__name__ for e in start_end]
+        # Sequential: Start, End, Start, End
+        assert types == ["ToolStart", "ToolEnd", "ToolStart", "ToolEnd"]
+
+    def test_single_tool_stays_sequential(self, tmp_path):
+        """A single tool call should use the sequential path (no parallel overhead)."""
+        f1 = tmp_path / "solo.txt"
+        f1.write_text("alone")
+
+        registry, read_tool, write_tool, edit_tool = _make_file_tools(tmp_path)
+
+        agent, provider = _make_agent(
+            responses=[
+                [ToolUse(tool_id="t1", tool_name="read", tool_input={"file_path": str(f1)})],
+                [TextChunk(text="Read it.")],
+            ],
+            tools=registry,
+            working_directory=str(tmp_path),
+        )
+        events = _collect_events(agent, "Read one file")
+
+        start_end = [e for e in events if isinstance(e, (ToolStart, ToolEnd))]
+        types = [type(e).__name__ for e in start_end]
+        # Single tool: sequential Start, End
+        assert types == ["ToolStart", "ToolEnd"]

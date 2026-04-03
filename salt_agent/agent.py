@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib as _hl
+import os
+from datetime import datetime, timezone
 from typing import AsyncIterator
 
 from salt_agent.compaction import (
@@ -33,6 +36,11 @@ from salt_agent.persistence import SessionPersistence
 from salt_agent.providers.base import ProviderAdapter
 from salt_agent.subagent import SubagentManager
 from salt_agent.tools.base import ToolRegistry
+
+# Tools that are safe to execute in parallel (no side effects, independent I/O)
+PARALLEL_SAFE_TOOLS = frozenset({
+    "web_fetch", "web_search", "read", "glob", "grep", "list_files",
+})
 
 
 class SaltAgent:
@@ -163,7 +171,7 @@ class SaltAgent:
             from salt_agent.tools.web_fetch import WebFetchTool
             from salt_agent.tools.web_search import WebSearchTool
 
-            registry.register(WebFetchTool())
+            registry.register(WebFetchTool(extractor=self.config.web_extractor))
             registry.register(WebSearchTool())
 
         return registry
@@ -220,12 +228,36 @@ class SaltAgent:
         self.hooks.on("pre_tool_use", snapshot_hook)
 
     def _build_system_prompt(self) -> str:
-        """Build the system prompt with any dynamic injections (e.g., todo state)."""
-        base = self.context.system_prompt
+        """Build the system prompt with dynamic injections each turn.
+
+        Reassembles from scratch: project instructions, user-supplied prompt,
+        dynamic context (date, cwd, todo state).
+        """
+        # Reassemble base from project instructions + user prompt
+        parts: list[str] = []
+        project_instructions = self.memory.load_project_instructions()
+        if project_instructions:
+            parts.append(project_instructions)
+        if self.config.system_prompt:
+            parts.append(self.config.system_prompt)
+
+        # Dynamic per-turn context
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        cwd = os.path.abspath(self.config.working_directory)
+        dynamic_parts = [
+            f"Current date/time: {now}",
+            f"Working directory: {cwd}",
+        ]
         todo_injection = self._get_todo_injection()
         if todo_injection:
-            return base + "\n\n" + todo_injection if base else todo_injection
-        return base
+            dynamic_parts.append(todo_injection)
+
+        parts.append("\n".join(dynamic_parts))
+
+        full_prompt = "\n\n".join(parts)
+        # Keep context.system_prompt updated for other consumers
+        self.context.set_system(full_prompt)
+        return full_prompt
 
     @classmethod
     def resume(
@@ -344,26 +376,70 @@ class SaltAgent:
                 "system": system_prompt,
             })
 
-            # Call LLM
+            # Call LLM (with prompt-too-long recovery)
             tool_uses: list[ToolUse] = []
             full_text = ""
+            _prompt_too_long = False
 
-            async for event in self.provider.stream_response(
-                system=system_prompt,
-                messages=messages,
-                tools=self._get_provider_tools(),
-                max_tokens=self.config.max_tokens,
-                temperature=self.config.temperature,
-            ):
-                yield event
+            try:
+                async for event in self.provider.stream_response(
+                    system=system_prompt,
+                    messages=messages,
+                    tools=self._get_provider_tools(),
+                    max_tokens=self.config.max_tokens,
+                    temperature=self.config.temperature,
+                ):
+                    # Check for prompt-too-long errors in AgentError events
+                    if isinstance(event, AgentError):
+                        error_lower = event.error.lower()
+                        if (
+                            ("prompt" in error_lower and "too long" in error_lower)
+                            or "too many tokens" in error_lower
+                            or "context length" in error_lower
+                            or "maximum context length exceeded" in error_lower
+                        ):
+                            _prompt_too_long = True
+                            break
+                        if not event.recoverable:
+                            yield event
+                            self.hooks.fire("on_error", {"error": event.error})
+                            return
 
-                if isinstance(event, TextChunk):
-                    full_text += event.text
-                elif isinstance(event, ToolUse):
-                    tool_uses.append(event)
-                elif isinstance(event, AgentError) and not event.recoverable:
-                    self.hooks.fire("on_error", {"error": event.error})
-                    return
+                    yield event
+
+                    if isinstance(event, TextChunk):
+                        full_text += event.text
+                    elif isinstance(event, ToolUse):
+                        tool_uses.append(event)
+            except Exception as e:
+                error_str = str(e).lower()
+                if (
+                    ("prompt" in error_str and "too long" in error_str)
+                    or "too many tokens" in error_str
+                    or "context length" in error_str
+                    or "maximum context length exceeded" in error_str
+                ):
+                    _prompt_too_long = True
+                else:
+                    raise
+
+            if _prompt_too_long:
+                # Auto-compact and retry this turn
+                old_tokens = estimate_messages_tokens(messages)
+                todo_state = self._get_todo_injection()
+                files_read = self.context._files_read
+                messages = await compact_context(
+                    messages,
+                    self.context.system_prompt,
+                    self.config,
+                    self.provider,
+                    todo_state=todo_state,
+                    files_read=files_read,
+                )
+                new_tokens = estimate_messages_tokens(messages)
+                self._conversation_messages[:] = messages
+                yield ContextCompacted(old_tokens=old_tokens, new_tokens=new_tokens)
+                continue  # retry this turn with compacted context
 
             # If no tool uses, we are done
             if not tool_uses:
@@ -396,92 +472,165 @@ class SaltAgent:
                 })
             messages.append({"role": "assistant", "content": assistant_content})
 
-            # Execute tools
+            # Execute tools -- parallel when safe, sequential otherwise
             tool_results: list[dict] = []
-            for tu in tool_uses:
-                # Fire pre_tool_use hook -- can block
-                hook_result = await self.hooks.fire_async("pre_tool_use", {
-                    "tool_name": tu.tool_name,
-                    "tool_input": tu.tool_input,
-                })
+            parallel_safe = (
+                len(tool_uses) > 1
+                and all(tu.tool_name in PARALLEL_SAFE_TOOLS for tu in tool_uses)
+            )
 
-                if hook_result.action == "block":
-                    result = f"Tool blocked: {hook_result.reason}"
+            if parallel_safe:
+                # --- Parallel execution path ---
+                # Emit all ToolStart events up front
+                for tu in tool_uses:
                     yield ToolStart(tool_name=tu.tool_name, tool_input=tu.tool_input)
+                    tools_used.append(tu.tool_name)
+
+                # Execute all tools concurrently
+                async def _run_one(tu: ToolUse) -> tuple[ToolUse, str, bool]:
+                    # Pre-tool hook
+                    hook_result = await self.hooks.fire_async("pre_tool_use", {
+                        "tool_name": tu.tool_name,
+                        "tool_input": tu.tool_input,
+                    })
+                    if hook_result.action == "block":
+                        return (tu, f"Tool blocked: {hook_result.reason}", False)
+
+                    tool = self.tools.get(tu.tool_name)
+                    if not tool:
+                        available = ", ".join(self.tools.names())
+                        return (tu, (
+                            f"Error: Tool '{tu.tool_name}' does not exist. "
+                            f"Available tools: {available}. "
+                            f"Do NOT try to simulate this tool with bash echo or other workarounds. "
+                            f"If you cannot accomplish the task with available tools, say so."
+                        ), False)
+
+                    try:
+                        loop = asyncio.get_event_loop()
+                        result = await loop.run_in_executor(
+                            None, lambda t=tu: tool.execute(**t.tool_input)
+                        )
+                        return (tu, result, True)
+                    except Exception as e:
+                        return (tu, f"Error: {str(e)}", False)
+
+                completed = await asyncio.gather(*[_run_one(tu) for tu in tool_uses])
+
+                # Emit all ToolEnd events and build results
+                for tu, result, success in completed:
                     yield ToolEnd(
                         tool_name=tu.tool_name,
-                        result=result,
-                        success=False,
+                        result=result[:200],
+                        success=success,
                     )
-                    tools_used.append(tu.tool_name)
+                    self.hooks.fire("post_tool_use", {
+                        "tool_name": tu.tool_name,
+                        "result": result[:500],
+                        "success": success,
+                    })
+                    result = self.context.truncate_tool_result(result)
+
+                    # Track for loop detection
+                    _sig = f"{tu.tool_name}:{_hl.md5(str(tu.tool_input).encode()).hexdigest()[:8]}"
+                    _recent_tool_sigs.append(_sig)
+                    _rh = _hl.md5(result.encode()).hexdigest()[:8]
+                    if _rh == _last_result_hash:
+                        _consecutive_same_result += 1
+                    else:
+                        _consecutive_same_result = 0
+                    _last_result_hash = _rh
+
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": tu.tool_id,
                         "content": result,
                     })
-                    continue
+            else:
+                # --- Sequential execution path ---
+                for tu in tool_uses:
+                    # Fire pre_tool_use hook -- can block
+                    hook_result = await self.hooks.fire_async("pre_tool_use", {
+                        "tool_name": tu.tool_name,
+                        "tool_input": tu.tool_input,
+                    })
 
-                yield ToolStart(tool_name=tu.tool_name, tool_input=tu.tool_input)
-                tools_used.append(tu.tool_name)
-
-                tool = self.tools.get(tu.tool_name)
-                if tool:
-                    try:
-                        result = tool.execute(**tu.tool_input)
-                        success = True
+                    if hook_result.action == "block":
+                        result = f"Tool blocked: {hook_result.reason}"
+                        yield ToolStart(tool_name=tu.tool_name, tool_input=tu.tool_input)
                         yield ToolEnd(
                             tool_name=tu.tool_name,
-                            result=result[:200],
-                            success=True,
+                            result=result,
+                            success=False,
                         )
-                    except Exception as e:
-                        result = f"Error: {str(e)}"
+                        tools_used.append(tu.tool_name)
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": tu.tool_id,
+                            "content": result,
+                        })
+                        continue
+
+                    yield ToolStart(tool_name=tu.tool_name, tool_input=tu.tool_input)
+                    tools_used.append(tu.tool_name)
+
+                    tool = self.tools.get(tu.tool_name)
+                    if tool:
+                        try:
+                            result = tool.execute(**tu.tool_input)
+                            success = True
+                            yield ToolEnd(
+                                tool_name=tu.tool_name,
+                                result=result[:200],
+                                success=True,
+                            )
+                        except Exception as e:
+                            result = f"Error: {str(e)}"
+                            success = False
+                            yield ToolEnd(
+                                tool_name=tu.tool_name,
+                                result=result,
+                                success=False,
+                            )
+                    else:
+                        available = ", ".join(self.tools.names())
+                        result = (
+                            f"Error: Tool '{tu.tool_name}' does not exist. "
+                            f"Available tools: {available}. "
+                            f"Do NOT try to simulate this tool with bash echo or other workarounds. "
+                            f"If you cannot accomplish the task with available tools, say so."
+                        )
                         success = False
                         yield ToolEnd(
                             tool_name=tu.tool_name,
                             result=result,
                             success=False,
                         )
-                else:
-                    available = ", ".join(self.tools.names())
-                    result = (
-                        f"Error: Tool '{tu.tool_name}' does not exist. "
-                        f"Available tools: {available}. "
-                        f"Do NOT try to simulate this tool with bash echo or other workarounds. "
-                        f"If you cannot accomplish the task with available tools, say so."
-                    )
-                    success = False
-                    yield ToolEnd(
-                        tool_name=tu.tool_name,
-                        result=result,
-                        success=False,
-                    )
 
-                # Fire post_tool_use hook
-                self.hooks.fire("post_tool_use", {
-                    "tool_name": tu.tool_name,
-                    "result": result[:500],
-                    "success": success,
-                })
+                    # Fire post_tool_use hook
+                    self.hooks.fire("post_tool_use", {
+                        "tool_name": tu.tool_name,
+                        "result": result[:500],
+                        "success": success,
+                    })
 
-                result = self.context.truncate_tool_result(result)
+                    result = self.context.truncate_tool_result(result)
 
-                # Track for loop detection
-                import hashlib as _hl
-                _sig = f"{tu.tool_name}:{_hl.md5(str(tu.tool_input).encode()).hexdigest()[:8]}"
-                _recent_tool_sigs.append(_sig)
-                _rh = _hl.md5(result.encode()).hexdigest()[:8]
-                if _rh == _last_result_hash:
-                    _consecutive_same_result += 1
-                else:
-                    _consecutive_same_result = 0
-                _last_result_hash = _rh
+                    # Track for loop detection
+                    _sig = f"{tu.tool_name}:{_hl.md5(str(tu.tool_input).encode()).hexdigest()[:8]}"
+                    _recent_tool_sigs.append(_sig)
+                    _rh = _hl.md5(result.encode()).hexdigest()[:8]
+                    if _rh == _last_result_hash:
+                        _consecutive_same_result += 1
+                    else:
+                        _consecutive_same_result = 0
+                    _last_result_hash = _rh
 
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": tu.tool_id,
-                    "content": result,
-                })
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": tu.tool_id,
+                        "content": result,
+                    })
 
             messages.append({"role": "user", "content": tool_results})
 

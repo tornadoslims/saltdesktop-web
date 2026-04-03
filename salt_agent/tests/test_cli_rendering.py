@@ -830,7 +830,7 @@ class TestToolResultBriefExtended:
     def test_web_fetch_large(self):
         content = "x" * 5000
         result = _tool_result_brief("web_fetch", content, True)
-        assert "k chars" in result
+        assert "K chars" in result
 
     def test_todo_with_mixed_states(self):
         output = "Task A: done\nTask B: in progress\nTask C: pending\nTask D: pending"

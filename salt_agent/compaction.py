@@ -5,6 +5,9 @@ Based on Claude Code's compaction approach, simplified to the essential layers.
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 from salt_agent.config import AgentConfig
 
 
@@ -42,6 +45,53 @@ def needs_compaction(messages: list[dict], config: AgentConfig) -> bool:
     return estimated > threshold
 
 
+def _restore_post_compact(
+    messages: list[dict],
+    files_read: set[str] | None,
+) -> list[dict]:
+    """Reinject recently-read files after compaction.
+
+    Restores up to 5 recently-read files (max 50K token budget total) so the
+    agent doesn't lose awareness of files it was actively working on.
+    """
+    if not files_read:
+        return messages
+
+    TOKEN_BUDGET = 50_000
+    MAX_FILE_CHARS = 10_000
+    used = 0
+    restorations: list[str] = []
+
+    # Get the 5 most recently added files (sets are unordered, so list and take last 5)
+    recent = list(files_read)[-5:]
+    for path in recent:
+        try:
+            content = Path(path).read_text()[:MAX_FILE_CHARS]
+            tokens = len(content) // 4
+            if used + tokens > TOKEN_BUDGET:
+                break
+            restorations.append(f"[File restored post-compaction: {path}]\n{content}")
+            used += tokens
+        except Exception:
+            pass
+
+    if restorations:
+        restoration_msg = {
+            "role": "user",
+            "content": (
+                "[Post-compaction file restoration]\n\n"
+                + "\n\n---\n\n".join(restorations)
+            ),
+        }
+        # Insert before the last 2 messages (the current exchange)
+        if len(messages) >= 3:
+            messages.insert(-2, restoration_msg)
+        else:
+            messages.insert(0, restoration_msg)
+
+    return messages
+
+
 async def compact_context(
     messages: list[dict],
     system_prompt: str,
@@ -72,26 +122,26 @@ async def compact_context(
 
     summarization_prompt = get_mode_prompt("summarize")
 
-    # Format old messages for summarization
+    # Format old messages for summarization -- pass full content (up to 10K per message)
     conversation_text = ""
     for msg in old_messages:
         role = msg.get("role", "?")
         content = msg.get("content", "")
         if isinstance(content, str):
-            conversation_text += f"[{role}]: {content[:500]}\n"
+            conversation_text += f"[{role}]: {content[:10000]}\n"
         elif isinstance(content, list):
             for block in content:
                 if isinstance(block, dict):
                     if block.get("type") == "text":
-                        conversation_text += f"[{role}]: {block['text'][:300]}\n"
+                        conversation_text += f"[{role}]: {block['text'][:10000]}\n"
                     elif block.get("type") == "tool_use":
                         conversation_text += (
                             f"[tool_call]: {block['name']}"
-                            f"({str(block.get('input', ''))[:200]})\n"
+                            f"({str(block.get('input', ''))[:2000]})\n"
                         )
                     elif block.get("type") == "tool_result":
                         conversation_text += (
-                            f"[tool_result]: {str(block.get('content', ''))[:200]}\n"
+                            f"[tool_result]: {str(block.get('content', ''))[:2000]}\n"
                         )
 
     # Call the LLM to summarize
@@ -99,7 +149,7 @@ async def compact_context(
     summary_prompt = f"""{summarization_prompt}
 
 ## Conversation to summarize:
-{conversation_text[:10000]}
+{conversation_text[:80000]}
 
 ## Current state to preserve:
 - Working directory context
@@ -107,17 +157,22 @@ async def compact_context(
 {f'- {todo_state}' if todo_state else ''}
 {f'- Files read: {", ".join(list(files_read_set)[:10])}' if files_read_set else ''}
 
-Produce a concise summary that captures all essential context, decisions made, and current state.
+First, write your analysis inside <analysis> tags, examining the conversation chronologically. Then produce the final summary outside the tags.
+
+CRITICAL: Do NOT call any tools. Only produce text output.
 """
 
     summary_text = ""
     from salt_agent.events import TextChunk
 
     async for event in provider.stream_response(
-        system="You are a context summarizer. Produce a concise summary.",
+        system=(
+            "You are a context summarizer. Produce a detailed summary that preserves "
+            "all essential context. CRITICAL: Do NOT call any tools. Only produce text output."
+        ),
         messages=[{"role": "user", "content": summary_prompt}],
         tools=[],  # no tools for summarization
-        max_tokens=2000,
+        max_tokens=20000,
     ):
         if isinstance(event, TextChunk):
             summary_text += event.text
@@ -125,6 +180,14 @@ Produce a concise summary that captures all essential context, decisions made, a
     if not summary_text:
         # Fallback: just truncate old messages
         return messages[-6:]
+
+    # Strip <analysis> scratchpad block from the summary (keep only the actual summary)
+    summary_text = re.sub(
+        r"<analysis>.*?</analysis>",
+        "",
+        summary_text,
+        flags=re.DOTALL,
+    ).strip()
 
     # Build compacted message list
     compacted = [
@@ -144,5 +207,8 @@ Produce a concise summary that captures all essential context, decisions made, a
         },
     ]
     compacted.extend(keep_messages)
+
+    # Fix 3: Post-compact file restoration
+    compacted = _restore_post_compact(compacted, files_read)
 
     return compacted

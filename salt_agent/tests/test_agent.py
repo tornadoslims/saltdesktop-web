@@ -410,14 +410,15 @@ class TestContextManager:
         assert cm.was_file_read("/tmp/test.txt")
         assert not cm.was_file_read("/tmp/other.txt")
 
-    def test_manage_pressure_reduces(self):
+    def test_manage_pressure_returns_unchanged(self):
+        """manage_pressure no longer does destructive truncation."""
         cm = ContextManager(context_window=100)  # Very small window
         msgs = [{"role": "user", "content": "x" * 200}]
         for i in range(20):
             msgs.append({"role": "assistant", "content": f"response {i}" * 50})
             msgs.append({"role": "user", "content": f"query {i}" * 50})
         result = cm.manage_pressure(msgs)
-        assert len(result) < len(msgs)
+        assert result == msgs  # Messages returned unchanged
 
 
 class TestCreateAgent:

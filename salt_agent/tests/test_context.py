@@ -79,16 +79,22 @@ class TestContextManagerPressure:
         result = cm.manage_pressure(msgs)
         assert result == msgs
 
-    def test_over_limit_messages_reduced(self):
+    def test_over_limit_messages_unchanged(self):
+        """manage_pressure no longer does destructive inline truncation.
+
+        It returns messages unchanged; compaction handles reduction properly.
+        """
         cm = ContextManager(context_window=100)  # Very small window
         msgs = [{"role": "user", "content": "original prompt"}]
         for i in range(20):
             msgs.append({"role": "assistant", "content": f"response {i} " * 50})
             msgs.append({"role": "user", "content": f"query {i} " * 50})
         result = cm.manage_pressure(msgs)
-        assert len(result) < len(msgs)
+        # Messages are returned unchanged -- compaction handles reduction
+        assert result == msgs
 
-    def test_pressure_preserves_first_message(self):
+    def test_pressure_preserves_all_messages(self):
+        """manage_pressure returns messages unchanged (delegates to compaction)."""
         cm = ContextManager(context_window=100)
         msgs = [{"role": "user", "content": "FIRST_MESSAGE"}]
         for i in range(20):
@@ -96,30 +102,10 @@ class TestContextManagerPressure:
             msgs.append({"role": "user", "content": f"q {i} " * 50})
         result = cm.manage_pressure(msgs)
         assert result[0]["content"] == "FIRST_MESSAGE"
+        assert result == msgs
 
-    def test_pressure_preserves_last_messages(self):
-        cm = ContextManager(context_window=100)
-        msgs = [{"role": "user", "content": "first"}]
-        for i in range(20):
-            msgs.append({"role": "assistant", "content": f"resp {i} " * 50})
-            msgs.append({"role": "user", "content": f"query {i} " * 50})
-        last_msg = msgs[-1]
-        result = cm.manage_pressure(msgs)
-        assert result[-1] == last_msg
-
-    def test_pressure_inserts_summary(self):
-        cm = ContextManager(context_window=100)
-        msgs = [{"role": "user", "content": "first"}]
-        for i in range(20):
-            msgs.append({"role": "assistant", "content": f"resp {i} " * 50})
-            msgs.append({"role": "user", "content": f"query {i} " * 50})
-        result = cm.manage_pressure(msgs)
-        # Should have a summary message in the middle
-        found_summary = any("summarized" in str(m.get("content", "")).lower() for m in result)
-        assert found_summary
-
-    def test_short_history_not_compacted(self):
-        """Messages <= 8 are never reduced even if over token limit."""
+    def test_short_history_unchanged(self):
+        """Short messages are returned unchanged."""
         cm = ContextManager(context_window=10)  # Tiny
         msgs = [
             {"role": "user", "content": "x" * 100},
@@ -160,7 +146,8 @@ class TestContextManagerFileTracking:
 
 
 class TestContextManagerPressureWithToolResults:
-    def test_tool_result_blocks_summarized(self):
+    def test_tool_result_blocks_unchanged(self):
+        """manage_pressure no longer truncates messages -- returns unchanged."""
         cm = ContextManager(context_window=100)
         msgs = [{"role": "user", "content": "do stuff"}]
         for i in range(10):
@@ -178,4 +165,5 @@ class TestContextManagerPressureWithToolResults:
                 ],
             })
         result = cm.manage_pressure(msgs)
-        assert len(result) < len(msgs)
+        # Messages returned unchanged -- compaction system handles reduction
+        assert result == msgs

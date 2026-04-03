@@ -22,6 +22,8 @@ class TestWebFetchTool:
 
         mock_resp = MagicMock()
         mock_resp.read.return_value = html
+        mock_resp.headers = MagicMock()
+        mock_resp.headers.get.return_value = 'text/html; charset=utf-8'
         mock_resp.__enter__ = MagicMock(return_value=mock_resp)
         mock_resp.__exit__ = MagicMock(return_value=False)
 
@@ -37,6 +39,8 @@ class TestWebFetchTool:
 
         mock_resp = MagicMock()
         mock_resp.read.return_value = html
+        mock_resp.headers = MagicMock()
+        mock_resp.headers.get.return_value = 'text/html; charset=utf-8'
         mock_resp.__enter__ = MagicMock(return_value=mock_resp)
         mock_resp.__exit__ = MagicMock(return_value=False)
 
@@ -52,13 +56,16 @@ class TestWebFetchTool:
 
         mock_resp = MagicMock()
         mock_resp.read.return_value = html
+        mock_resp.headers = MagicMock()
+        mock_resp.headers.get.return_value = 'text/html; charset=utf-8'
         mock_resp.__enter__ = MagicMock(return_value=mock_resp)
         mock_resp.__exit__ = MagicMock(return_value=False)
 
         with patch("urllib.request.urlopen", return_value=mock_resp):
             result = tool.execute(url="http://example.com", max_chars=100)
 
-        assert len(result) <= 100
+        # 100 chars + truncation suffix
+        assert len(result) <= 150
 
     def test_fetch_error_handling(self):
         tool = WebFetchTool()
@@ -71,17 +78,20 @@ class TestWebFetchTool:
 
     def test_fetch_default_max_chars(self):
         tool = WebFetchTool()
-        html = b"<body>" + b"A" * 20000 + b"</body>"
+        html = b"<body>" + b"A" * 60000 + b"</body>"
 
         mock_resp = MagicMock()
         mock_resp.read.return_value = html
+        mock_resp.headers = MagicMock()
+        mock_resp.headers.get.return_value = 'text/html; charset=utf-8'
         mock_resp.__enter__ = MagicMock(return_value=mock_resp)
         mock_resp.__exit__ = MagicMock(return_value=False)
 
         with patch("urllib.request.urlopen", return_value=mock_resp):
             result = tool.execute(url="http://example.com")
 
-        assert len(result) <= 10000
+        # Default is 50000 + truncation suffix
+        assert len(result) <= 50000 + 50
 
 
 class TestWebSearchTool:

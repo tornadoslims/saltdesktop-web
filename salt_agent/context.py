@@ -51,46 +51,15 @@ class ContextManager:
         )
 
     def manage_pressure(self, messages: list[dict]) -> list[dict]:
-        """Reduce message history if approaching context limit.
+        """Check if context pressure is high and signal that compaction is needed.
 
-        Strategy: if estimated tokens exceed 75% of the window, summarize
-        older turns by replacing their content with a placeholder.
+        This method no longer does destructive inline message truncation.
+        Instead, it simply returns the messages unchanged -- the compaction
+        system (compact_context) handles proper LLM-based summarization when
+        needs_compaction() returns True.
+
+        Tool result truncation is handled separately by truncate_tool_result()
+        at the point of insertion, which is fine (individual results, not whole messages).
         """
-        threshold = int(self.context_window * 0.75)
-        tokens = self.estimate_messages_tokens(messages)
-
-        if tokens <= threshold:
-            return messages
-
-        # Keep the first message (original prompt) and last 6 messages
-        if len(messages) <= 8:
-            return messages
-
-        keep_start = 1
-        keep_end = 6
-        middle = messages[keep_start:-keep_end]
-
-        # Summarize middle messages
-        summary_parts = []
-        for msg in middle:
-            role = msg.get("role", "?")
-            content = msg.get("content", "")
-            if isinstance(content, list):
-                text_parts = []
-                for block in content:
-                    if isinstance(block, dict):
-                        if block.get("type") == "text":
-                            text_parts.append(block["text"][:100])
-                        elif block.get("type") == "tool_use":
-                            text_parts.append(f"[tool: {block.get('name', '?')}]")
-                        elif block.get("type") == "tool_result":
-                            text_parts.append("[tool result]")
-                content_str = " | ".join(text_parts)
-            else:
-                content_str = str(content)[:200]
-            summary_parts.append(f"{role}: {content_str}")
-
-        summary = "[Earlier conversation summarized]\n" + "\n".join(summary_parts)
-        summary_msg = {"role": "user", "content": summary}
-
-        return messages[:keep_start] + [summary_msg] + messages[-keep_end:]
+        # No destructive inline summarization -- let compaction handle it properly
+        return messages

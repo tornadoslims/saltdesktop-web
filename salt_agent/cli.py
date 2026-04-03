@@ -452,11 +452,14 @@ def _tool_result_brief(name: str, result: str, success: bool) -> str:
         char_count = len(result_stripped)
         # First sentence
         first_sent = re.split(r'[.!?]\s', result_stripped, maxsplit=1)[0]
-        if len(first_sent) > 50:
-            first_sent = first_sent[:47] + "..."
+        if len(first_sent) > 60:
+            first_sent = first_sent[:57] + "..."
         if char_count < 1000:
             return f"{char_count} chars — {first_sent}"
-        return f"{char_count // 1000}k chars — {first_sent}"
+        elif char_count < 1_000_000:
+            return f"{char_count / 1000:.1f}K chars — {first_sent}"
+        else:
+            return f"{char_count / 1_000_000:.1f}M chars — {first_sent}"
 
     if name_lower == "todo_write":
         # Try to count tasks
@@ -1025,17 +1028,20 @@ async def _interactive(
         if not line:
             continue
 
-        # Slash commands
+        # Input classification (Claude Code pattern: classify before processing)
+        # Only treat as slash command if the first word is a registered command
+        # File paths like /Users/... are treated as regular prompts
         if line.startswith("/"):
-            result = _handle_slash_command(line, agent, tracker, verbose)
-            if result is None:
-                _write(f"{_c(_DIM, 'Goodbye!')}\n")
-                return
-            if result:
-                continue
-            # Unknown command
-            _write(f"\n  {_c(_YELLOW, f'Unknown command: {line.split()[0]}. Type /help for available commands.')}\n\n")
-            continue
+            first_word = line.split()[0] if line.split() else line
+            known_commands = set(_SLASH_COMMANDS.keys()) | {"/q", "/exit"}
+            if first_word in known_commands:
+                result = _handle_slash_command(line, agent, tracker, verbose)
+                if result is None:
+                    _write(f"{_c(_DIM, 'Goodbye!')}\n")
+                    return
+                if result:
+                    continue
+            # Not a known command — treat as regular prompt (e.g., file path)
 
         # Run agent
         try:
@@ -1126,6 +1132,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Output events as JSON lines (for piping)",
     )
     parser.add_argument(
+        "--web-extractor",
+        default="trafilatura",
+        choices=["trafilatura", "readability", "regex"],
+        help="HTML content extraction method (default: trafilatura)",
+    )
+    parser.add_argument(
         "-v", "--version",
         action="version",
         version=f"salt-agent {__version__}",
@@ -1162,6 +1174,7 @@ def main(argv: list[str] | None = None) -> None:
         max_turns=args.max_turns,
         working_directory=os.path.abspath(args.directory),
         system_prompt=args.system,
+        web_extractor=args.web_extractor,
     )
 
     from salt_agent.agent import SaltAgent

@@ -70,14 +70,20 @@ class TestAnthropicAdapter:
         block_stop.type = "content_block_stop"
 
         mock_stream = _make_mock_stream([text_start, delta1, delta2, block_stop])
+        # Mock get_final_message for usage tracking
+        mock_stream_obj = mock_stream.__enter__.return_value
+        mock_final = MagicMock()
+        mock_final.usage = MagicMock(input_tokens=10, output_tokens=5)
+        mock_stream_obj.get_final_message.return_value = mock_final
 
+        # Patch the client on the adapter instance (client created in __init__)
         mock_client = MagicMock()
         mock_client.messages.stream.return_value = mock_stream
+        adapter.client = mock_client
 
-        with patch("anthropic.Anthropic", return_value=mock_client):
-            events = _run_async(
-                lambda: adapter.stream_response(system="test", messages=[], tools=[])
-            )
+        events = _run_async(
+            lambda: adapter.stream_response(system="test", messages=[], tools=[])
+        )
 
         text_events = [e for e in events if isinstance(e, TextChunk)]
         assert len(text_events) == 2
@@ -103,15 +109,20 @@ class TestAnthropicAdapter:
         block_stop.type = "content_block_stop"
 
         mock_stream = _make_mock_stream([tool_start, delta, block_stop])
+        mock_stream_obj = mock_stream.__enter__.return_value
+        mock_final = MagicMock()
+        mock_final.usage = MagicMock(input_tokens=20, output_tokens=15)
+        mock_stream_obj.get_final_message.return_value = mock_final
+
         mock_client = MagicMock()
         mock_client.messages.stream.return_value = mock_stream
+        adapter.client = mock_client
 
-        with patch("anthropic.Anthropic", return_value=mock_client):
-            events = _run_async(
-                lambda: adapter.stream_response(
-                    system="test", messages=[], tools=[{"name": "read"}]
-                )
+        events = _run_async(
+            lambda: adapter.stream_response(
+                system="test", messages=[], tools=[{"name": "read"}]
             )
+        )
 
         tool_events = [e for e in events if isinstance(e, ToolUse)]
         assert len(tool_events) == 1
@@ -127,11 +138,11 @@ class TestAnthropicAdapter:
 
         mock_client = MagicMock()
         mock_client.messages.stream.return_value = mock_stream
+        adapter.client = mock_client
 
-        with patch("anthropic.Anthropic", return_value=mock_client):
-            events = _run_async(
-                lambda: adapter.stream_response(system="test", messages=[], tools=[])
-            )
+        events = _run_async(
+            lambda: adapter.stream_response(system="test", messages=[], tools=[])
+        )
 
         error_events = [e for e in events if isinstance(e, AgentError)]
         assert len(error_events) == 1
