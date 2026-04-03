@@ -1,0 +1,73 @@
+site_name: SaltAgent Documentation
+site_description: A general-purpose AI agent execution engine
+repo_url: https://github.com/tornadoslims/saltdesktop-web
+docs_dir: docs-site
+
+theme:
+  name: material
+  palette:
+    scheme: slate
+    primary: cyan
+    accent: cyan
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - content.code.copy
+    - search.highlight
+
+nav:
+  - Home: index.md
+  - Getting Started: getting-started.md
+  - Architecture: architecture.md
+  - Embedding in Python: embedding.md
+  - Tools:
+    - Overview: tools/index.md
+    - File Tools: tools/file-tools.md
+    - Bash: tools/bash.md
+    - Web Tools: tools/web-tools.md
+    - Task Tools: tools/task-tools.md
+    - Git Tools: tools/git-tools.md
+    - Custom Tools: tools/custom-tools.md
+  - Providers:
+    - Overview: providers/index.md
+    - Anthropic: providers/anthropic.md
+    - OpenAI: providers/openai.md
+    - Custom Provider: providers/custom-provider.md
+  - Features:
+    - Context Compaction: features/compaction.md
+    - Memory System: features/memory.md
+    - Hook Engine: features/hooks.md
+    - Permissions: features/permissions.md
+    - Session Persistence: features/persistence.md
+    - Subagents: features/subagents.md
+    - Background Tasks: features/tasks.md
+    - Skills: features/skills.md
+    - MCP Integration: features/mcp.md
+    - Streaming Execution: features/streaming.md
+    - State Management: features/state.md
+  - CLI:
+    - Usage: cli/index.md
+    - Commands: cli/commands.md
+    - Configuration: cli/configuration.md
+  - Internals:
+    - Agent Loop: internals/agent-loop.md
+    - Context Assembly: internals/context-assembly.md
+    - Prompt System: internals/prompt-system.md
+    - Token Budget: internals/token-budget.md
+    - Error Recovery: internals/error-recovery.md
+  - API Reference:
+    - Overview: api-reference/index.md
+    - SaltAgent: api-reference/salt-agent.md
+    - AgentConfig: api-reference/config.md
+    - Events: api-reference/events.md
+    - Tools: api-reference/tools.md
+    - Hooks: api-reference/hooks.md
+
+markdown_extensions:
+  - pymdownx.highlight
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - admonition
+  - pymdownx.details
