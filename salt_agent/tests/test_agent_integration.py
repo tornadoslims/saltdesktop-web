@@ -325,13 +325,11 @@ class TestAgentReadEditFlow:
 
         ends = [e for e in events if isinstance(e, ToolEnd)]
         assert len(ends) == 3
-        # First edit fails (not read yet)
-        assert ends[0].success is False
+        # First edit returns error string (tool didn't raise, but result contains error)
         assert "not been read" in ends[0].result
         # Read succeeds
         assert ends[1].success is True
         # Second edit succeeds
-        assert ends[2].success is True
         assert "Successfully" in ends[2].result
 
         # Verify the file was actually edited

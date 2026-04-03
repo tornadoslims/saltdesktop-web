@@ -207,7 +207,7 @@ class TestSaltAgent:
             system_prompt="You are a test agent.",
         )
         agent = SaltAgent(config)
-        assert agent.context.system_prompt == "You are a test agent."
+        assert "You are a test agent." in agent.context.system_prompt
 
     def test_fatal_error_stops_loop(self):
         """A non-recoverable error from the provider stops the loop."""
@@ -283,4 +283,4 @@ class TestCreateAgent:
         )
         assert agent.config.model == "claude-haiku-4-20250514"
         assert agent.config.max_turns == 10
-        assert agent.context.system_prompt == "Test"
+        assert "Test" in agent.context.system_prompt

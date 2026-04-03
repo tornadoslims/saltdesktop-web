@@ -15,6 +15,9 @@ from salt_agent.events import (
     ToolUse,
 )
 from salt_agent.hooks import HookEngine, HookResult
+from salt_agent.memory import MemorySystem
+from salt_agent.permissions import PermissionRule, PermissionSystem
+from salt_agent.persistence import SessionPersistence
 from salt_agent.tools.base import Tool, ToolDefinition, ToolParam, ToolRegistry
 from salt_agent.tools.todo import TodoWriteTool
 
@@ -37,6 +40,10 @@ __all__ = [
     "TodoWriteTool",
     "HookEngine",
     "HookResult",
+    "MemorySystem",
+    "PermissionRule",
+    "PermissionSystem",
+    "SessionPersistence",
     "needs_compaction",
     "compact_context",
     "create_agent",

@@ -22,7 +22,10 @@ from salt_agent.events import (
     ToolStart,
     ToolUse,
 )
-from salt_agent.hooks import HookEngine
+from salt_agent.hooks import HookEngine, HookResult
+from salt_agent.memory import MemorySystem
+from salt_agent.permissions import PermissionSystem
+from salt_agent.persistence import SessionPersistence
 from salt_agent.providers.base import ProviderAdapter
 from salt_agent.tools.base import ToolRegistry
 
@@ -39,8 +42,31 @@ class SaltAgent:
             max_tool_result_chars=config.max_tool_result_chars,
         )
         self.hooks = HookEngine()
-        if config.system_prompt:
-            self.context.set_system(config.system_prompt)
+
+        # Memory system
+        self.memory = MemorySystem(
+            working_directory=config.working_directory,
+            memory_dir=config.memory_dir or None,
+        )
+
+        # Session persistence (optional)
+        self.persistence: SessionPersistence | None = None
+        if config.persist:
+            self.persistence = SessionPersistence(
+                session_id=config.session_id or None,
+                sessions_dir=config.sessions_dir or None,
+            )
+
+        # Permission system
+        self.permissions = PermissionSystem(
+            rules=config.permission_rules,
+            ask_callback=config.permission_ask_callback,
+        )
+        # Register permission hook
+        self._register_permission_hook()
+
+        # Build system prompt: project instructions first, then user-supplied prompt
+        self._assemble_system_prompt()
 
     def _create_provider(self) -> ProviderAdapter:
         if self.config.provider == "anthropic":
@@ -92,6 +118,31 @@ class SaltAgent:
             return todo_tool.get_context_injection()
         return ""
 
+    def _assemble_system_prompt(self) -> None:
+        """Assemble the system prompt: project instructions + user-supplied prompt."""
+        parts: list[str] = []
+        # Project instructions (highest priority -- at the top)
+        project_instructions = self.memory.load_project_instructions()
+        if project_instructions:
+            parts.append(project_instructions)
+        # User-supplied system prompt
+        if self.config.system_prompt:
+            parts.append(self.config.system_prompt)
+        self.context.set_system("\n\n".join(parts))
+
+    def _register_permission_hook(self) -> None:
+        """Register the permission system as a pre_tool_use hook."""
+
+        def permission_hook(data: dict) -> HookResult | None:
+            tool_name = data.get("tool_name", "")
+            tool_input = data.get("tool_input", {})
+            action, reason = self.permissions.check(tool_name, tool_input)
+            if action == "deny":
+                return HookResult(action="block", reason=reason)
+            return None
+
+        self.hooks.on("pre_tool_use", permission_hook)
+
     def _build_system_prompt(self) -> str:
         """Build the system prompt with any dynamic injections (e.g., todo state)."""
         base = self.context.system_prompt
@@ -99,6 +150,37 @@ class SaltAgent:
         if todo_injection:
             return base + "\n\n" + todo_injection if base else todo_injection
         return base
+
+    @classmethod
+    def resume(
+        cls,
+        session_id: str,
+        config: AgentConfig | None = None,
+        tools: ToolRegistry | None = None,
+    ) -> tuple[SaltAgent, list[dict], str]:
+        """Resume a session from a persisted checkpoint.
+
+        Returns (agent, messages, system_prompt) so the caller can continue
+        the conversation.
+        """
+        if config is None:
+            config = AgentConfig()
+        config.session_id = session_id
+        config.persist = True
+
+        agent = cls(config, tools=tools)
+        assert agent.persistence is not None
+
+        checkpoint = agent.persistence.load_last_checkpoint()
+        if checkpoint is None:
+            raise ValueError(f"No checkpoint found for session {session_id}")
+
+        messages = checkpoint.get("messages", [])
+        system = checkpoint.get("system", "")
+        if system:
+            agent.context.set_system(system)
+
+        return agent, messages, system
 
     async def run(self, prompt: str) -> AsyncIterator[AgentEvent]:
         """Run the agent loop, yielding events as they occur."""
@@ -134,6 +216,10 @@ class SaltAgent:
 
             # Build system prompt with todo injection
             system_prompt = self._build_system_prompt()
+
+            # Save checkpoint BEFORE the API call (crash recovery)
+            if self.persistence:
+                self.persistence.save_checkpoint(messages, system_prompt)
 
             # Fire pre_api_call hook
             self.hooks.fire("pre_api_call", {
