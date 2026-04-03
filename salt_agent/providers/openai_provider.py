@@ -174,6 +174,23 @@ class OpenAIAdapter(ProviderAdapter):
                         tool_input=tool_input,
                     )
 
+    async def quick_query(self, prompt: str, system: str = "", max_tokens: int = 500) -> str:
+        """Non-streaming query using the OpenAI completions API directly (faster)."""
+        try:
+            client = self._get_client()
+            resp = client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system or "You are a helpful assistant. Be concise."},
+                    {"role": "user", "content": prompt},
+                ],
+                max_completion_tokens=max_tokens,
+                temperature=0.0,
+            )
+            return resp.choices[0].message.content or ""
+        except Exception:
+            return ""
+
     @staticmethod
     def _convert_message(msg: dict) -> dict:
         """Convert an Anthropic-format message to OpenAI format."""

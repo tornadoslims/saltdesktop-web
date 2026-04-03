@@ -67,6 +67,10 @@ class MockProvider:
             # No more responses - just return text
             yield TextChunk(text="Done.")
 
+    async def quick_query(self, prompt: str, system: str = "", max_tokens: int = 500) -> str:
+        """Side-queries return empty -- don't consume scripted responses."""
+        return ""
+
 
 def _run_agent(agent, prompt):
     """Run the agent and collect all events."""
@@ -274,8 +278,8 @@ class TestConversationPersistence:
         # Should contain at least: user("First message"), user("Second message")
         user_msgs = [m for m in msgs if m.get("role") == "user" and isinstance(m.get("content"), str)]
         assert len(user_msgs) >= 2
-        assert user_msgs[0]["content"] == "First message"
-        assert user_msgs[1]["content"] == "Second message"
+        assert user_msgs[0]["content"].startswith("First message")
+        assert user_msgs[1]["content"].startswith("Second message")
 
     def test_clear_conversation(self):
         """clear_conversation() resets message history."""
@@ -315,7 +319,7 @@ class TestConversationPersistence:
         # Should only have the one new message
         user_msgs = [m for m in msgs if m.get("role") == "user" and isinstance(m.get("content"), str)]
         assert len(user_msgs) == 1
-        assert user_msgs[0]["content"] == "Fresh start"
+        assert user_msgs[0]["content"].startswith("Fresh start")
 
     def test_one_shot_doesnt_accumulate(self):
         """Each one-shot run with a fresh agent starts clean."""
@@ -427,7 +431,7 @@ class TestCreateAgent:
         from salt_agent import create_agent
         agent = create_agent(provider="anthropic")
         assert isinstance(agent, SaltAgent)
-        assert len(agent.tools.names()) == 15  # read, write, edit, multi_edit, bash, glob, grep, list_files, todo_write, agent, web_search, web_fetch, git_status, git_diff, git_commit
+        assert len(agent.tools.names()) == 23  # read, write, edit, multi_edit, bash, glob, grep, list_files, todo_write, agent, task_create/list/get/output/stop/update, web_search, web_fetch, git_status, git_diff, git_commit, skill, tool_search
 
     def test_create_with_custom_config(self):
         from salt_agent import create_agent

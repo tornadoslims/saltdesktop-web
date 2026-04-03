@@ -8,6 +8,7 @@ import os
 from datetime import datetime, timezone
 from typing import AsyncIterator
 
+from salt_agent.attachments import AttachmentAssembler
 from salt_agent.compaction import (
     compact_context,
     estimate_messages_tokens,
@@ -30,11 +31,15 @@ from salt_agent.events import (
 )
 from salt_agent.file_history import FileHistory
 from salt_agent.hooks import HookEngine, HookResult
-from salt_agent.memory import MemorySystem
+from salt_agent.memory import MemorySystem, find_relevant_memories
 from salt_agent.permissions import PermissionSystem
 from salt_agent.persistence import SessionPersistence
 from salt_agent.providers.base import ProviderAdapter
+from salt_agent.skills.manager import SkillManager
+from salt_agent.stop_hooks import StopHookRunner
 from salt_agent.subagent import SubagentManager
+from salt_agent.tasks.manager import TaskManager
+from salt_agent.token_budget import BudgetTracker
 from salt_agent.tools.base import ToolRegistry
 
 # Tools that are safe to execute in parallel (no side effects, independent I/O)
@@ -82,6 +87,9 @@ class SaltAgent:
         # Subagent manager (before tools, since AgentTool needs it)
         self.subagent_manager = SubagentManager(self)
 
+        # Task manager (background tasks in separate threads)
+        self.task_manager = TaskManager(self)
+
         # File history (rewind support)
         session_id = ""
         if self.persistence:
@@ -91,6 +99,16 @@ class SaltAgent:
             session_id = str(uuid.uuid4())
         self.file_history = FileHistory(session_id=session_id)
         self._register_file_history_hook()
+
+        # Skills system (before tools, since SkillTool needs it)
+        self.skill_manager = SkillManager(extra_dirs=config.skill_dirs)
+
+        # Token budget tracker (real API usage, not estimates)
+        self.budget = BudgetTracker(
+            context_window=config.context_window,
+            max_output=config.max_tokens,
+            model=config.model,
+        )
 
         # Tools (after subagent_manager since AgentTool references it)
         self.tools = tools or self._default_tools()
@@ -118,6 +136,12 @@ class SaltAgent:
                 self.mcp_manager = MCPManager(working_directory=mcp_dir)
             except ImportError:
                 pass  # mcp package not installed
+
+        # Stop hooks (post-turn processing: memory extraction, session title, stats)
+        self.stop_hooks = StopHookRunner(self)
+
+        # Attachment assembler (per-turn system-reminder injection)
+        self.attachments = AttachmentAssembler(self)
 
         # Persistent conversation history for interactive mode
         self._conversation_messages: list[dict] = []
@@ -200,6 +224,22 @@ class SaltAgent:
         registry.register(TodoWriteTool())
         registry.register(AgentTool(self.subagent_manager))
 
+        # Task tools (background task management)
+        from salt_agent.tools.tasks import (
+            TaskCreateTool,
+            TaskGetTool,
+            TaskListTool,
+            TaskOutputTool,
+            TaskStopTool,
+            TaskUpdateTool,
+        )
+        registry.register(TaskCreateTool(self.task_manager))
+        registry.register(TaskListTool(self.task_manager))
+        registry.register(TaskGetTool(self.task_manager))
+        registry.register(TaskOutputTool(self.task_manager))
+        registry.register(TaskStopTool(self.task_manager))
+        registry.register(TaskUpdateTool(self.task_manager))
+
         # Optional web tools
         if self.config.include_web_tools:
             from salt_agent.tools.web_fetch import WebFetchTool
@@ -215,6 +255,14 @@ class SaltAgent:
             registry.register(GitStatusTool(working_directory=wd))
             registry.register(GitDiffTool(working_directory=wd))
             registry.register(GitCommitTool(working_directory=wd))
+
+        # Skill tool (invoke skills by name)
+        from salt_agent.tools.skill_tool import SkillTool
+        registry.register(SkillTool(self.skill_manager))
+
+        # ToolSearch (deferred tool loading infrastructure)
+        from salt_agent.tools.tool_search import ToolSearchTool
+        registry.register(ToolSearchTool(registry))
 
         return registry
 
@@ -428,15 +476,59 @@ class SaltAgent:
             # Build system prompt with todo injection
             system_prompt = self._build_system_prompt()
 
+            # --- Per-turn system-reminder injection (into a COPY of messages) ---
+            reminders = self.attachments.assemble()
+
+            # Inject relevant memories via LLM side-query
+            last_content = messages[-1].get("content", "") if messages else ""
+            if isinstance(last_content, str):
+                query_text = last_content
+            elif isinstance(last_content, list):
+                query_text = " ".join(
+                    b.get("text", "") for b in last_content
+                    if isinstance(b, dict) and b.get("type") == "text"
+                )
+            else:
+                query_text = str(last_content)
+
+            if query_text and len(query_text) > 10:
+                try:
+                    memory_files = await find_relevant_memories(
+                        query=query_text,
+                        memory_index=self.memory.scan_memory_files(),
+                        provider=self.provider,
+                    )
+                    for filename in memory_files:
+                        content = self.memory.load_memory_file(filename)
+                        if content:
+                            reminders.append(
+                                f"<system-reminder>\nRelevant memory ({filename}):\n"
+                                f"{content[:2000]}\n</system-reminder>"
+                            )
+                except Exception:
+                    pass  # Memory recall must never crash the agent
+
+            # Build turn_messages: inject reminders into a copy (NOT saved to _conversation_messages)
+            turn_messages = list(messages)
+            if reminders:
+                reminder_block = "\n".join(reminders)
+                last_msg = turn_messages[-1]
+                if isinstance(last_msg.get("content"), str):
+                    turn_messages[-1] = dict(last_msg)  # shallow copy
+                    turn_messages[-1]["content"] = last_msg["content"] + "\n\n" + reminder_block
+
             # Save checkpoint BEFORE the API call (crash recovery)
             if self.persistence:
                 self.persistence.save_checkpoint(messages, system_prompt)
 
             # Fire pre_api_call hook
             self.hooks.fire("pre_api_call", {
-                "messages": messages,
+                "messages": turn_messages,
                 "system": system_prompt,
             })
+
+            # Start turn budget tracking
+            self.budget.start_turn()
 
             # Call LLM (with prompt-too-long recovery)
             tool_uses: list[ToolUse] = []
@@ -446,7 +538,7 @@ class SaltAgent:
             try:
                 async for event in self.provider.stream_response(
                     system=system_prompt,
-                    messages=messages,
+                    messages=turn_messages,
                     tools=self._get_provider_tools(),
                     max_tokens=self.config.max_tokens,
                     temperature=self.config.temperature,
@@ -485,6 +577,13 @@ class SaltAgent:
                 else:
                     raise
 
+            # Record real token usage from provider
+            if hasattr(self.provider, "last_usage") and self.provider.last_usage:
+                self.budget.record_usage(
+                    self.provider.last_usage.get("input_tokens", 0),
+                    self.provider.last_usage.get("output_tokens", 0),
+                )
+
             if _prompt_too_long:
                 # Auto-compact and retry this turn
                 old_tokens = estimate_messages_tokens(messages)
@@ -503,13 +602,35 @@ class SaltAgent:
                 yield ContextCompacted(old_tokens=old_tokens, new_tokens=new_tokens)
                 continue  # retry this turn with compacted context
 
-            # If no tool uses, we are done
+            # If no tool uses, check if model should continue or we are done
             if not tool_uses:
+                # Check if model hit output limit and should be nudged to continue
+                if self.budget.should_continue():
+                    if full_text:
+                        self._conversation_messages.append(
+                            {"role": "assistant", "content": full_text}
+                        )
+                    self._conversation_messages.append({
+                        "role": "user",
+                        "content": (
+                            "<system-reminder>Your response was cut off. "
+                            "Please continue where you left off.</system-reminder>"
+                        ),
+                    })
+                    continue  # run another turn
+
                 # Save final assistant message to conversation history
                 if full_text:
                     self._conversation_messages.append(
                         {"role": "assistant", "content": full_text}
                     )
+                # Run stop hooks (memory extraction, session title, stats)
+                try:
+                    await self.stop_hooks.run_after_turn(
+                        self._conversation_messages, turn + 1
+                    )
+                except Exception:
+                    pass  # Stop hooks must never crash the agent
                 self.hooks.fire("on_complete", {
                     "turns": turn + 1,
                     "tools_used": tools_used,
@@ -745,6 +866,14 @@ class SaltAgent:
                 read_tool._pending_images.clear()
 
             messages.append({"role": "user", "content": tool_results})
+
+            # Run stop hooks between turns (after tool results appended)
+            try:
+                await self.stop_hooks.run_after_turn(
+                    self._conversation_messages, turn + 1
+                )
+            except Exception:
+                pass  # Stop hooks must never crash the agent
 
         self.hooks.fire("on_error", {
             "error": f"Max turns ({self.config.max_turns}) reached",

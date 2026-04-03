@@ -23,6 +23,7 @@ from salt_agent.memory import MemorySystem
 from salt_agent.permissions import PermissionRule, PermissionSystem
 from salt_agent.persistence import SessionPersistence
 from salt_agent.subagent import SubagentManager
+from salt_agent.tasks import Task, TaskManager, TaskStatus
 from salt_agent.plugins import PluginManager, SaltPlugin
 from salt_agent.security import SecurityClassifier
 from salt_agent.tools.base import Tool, ToolDefinition, ToolParam, ToolRegistry
@@ -46,6 +47,9 @@ __all__ = [
     "SubagentComplete",
     "FileHistory",
     "SubagentManager",
+    "Task",
+    "TaskManager",
+    "TaskStatus",
     "Tool",
     "ToolDefinition",
     "ToolParam",

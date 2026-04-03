@@ -642,6 +642,7 @@ _SLASH_COMMANDS = {
     "/compact": "Compress context (summarize old turns)",
     "/mode": "Show/change agent mode",
     "/tools": "List available tools",
+    "/skills": "List available skills",
     "/cost": "Show token usage this session",
     "/history": "Show conversation summary",
     "/auto": "Toggle auto mode (skip all permission prompts)",
@@ -649,6 +650,7 @@ _SLASH_COMMANDS = {
     "/approve": "Approve plan and let agent proceed",
     "/search": "Search past sessions: /search <query>",
     "/verify": "Spawn verification specialist to review code",
+    "/tasks": "List background tasks and their status",
     "/quit": "Exit",
 }
 
@@ -695,13 +697,44 @@ def _handle_slash_command(
         _write("\n")
         return True
 
+    if command == "/skills":
+        _write("\n")
+        if hasattr(agent, "skill_manager"):
+            skills = agent.skill_manager.list_user_invocable()
+            if skills:
+                _write(f"  {_c(_BOLD, 'Available Skills')}\n\n")
+                for s in sorted(skills, key=lambda s: s.name):
+                    desc = f" -- {s.description}" if s.description else ""
+                    _write(f"  {_c(_CYAN, '/' + s.name):20s}  {_c(_DIM, desc)}\n")
+            else:
+                _write(f"  {_c(_DIM, 'No skills installed.')}\n")
+        else:
+            _write(f"  {_c(_DIM, 'Skill system not available.')}\n")
+        _write("\n")
+        return True
+
     if command == "/cost":
         _write("\n")
-        info = tracker.format()
-        if info:
-            _write(f"  {_c(_DIM, info)}\n")
-        else:
-            _write(f"  {_c(_DIM, 'No tokens used yet.')}\n")
+        # Prefer real budget tracker data from the agent
+        _budget_shown = False
+        try:
+            budget = getattr(agent, "budget", None)
+            if budget and hasattr(budget, "total_tokens") and budget.total_tokens > 0:
+                info = budget.format()
+                stats = budget.get_stats()
+                _write(f"  {_c(_BOLD, 'Token Usage')}\n\n")
+                _write(f"  {_c(_DIM, info)}\n")
+                turn_count = stats["turns"]
+                _write(f"  {_c(_DIM, f'Turns: {turn_count}')}\n")
+                _budget_shown = True
+        except (TypeError, AttributeError):
+            pass
+        if not _budget_shown:
+            info = tracker.format()
+            if info:
+                _write(f"  {_c(_DIM, info)}\n")
+            else:
+                _write(f"  {_c(_DIM, 'No tokens used yet.')}\n")
         _write("\n")
         return True
 
@@ -778,6 +811,27 @@ def _handle_slash_command(
             _write(f"\n{render_markdown(output)}\n\n")
         except Exception as e:
             _write(f"\n  {_c(_RED, f'Verification failed: {e}')}\n\n")
+        return True
+
+    if command == "/tasks":
+        if hasattr(agent, "task_manager"):
+            tasks = agent.task_manager.list_tasks()
+            if not tasks:
+                _write(f"\n  {_c(_DIM, 'No background tasks.')}\n\n")
+            else:
+                _write(f"\n  {_c(_BOLD, 'Background Tasks')}\n\n")
+                for t in tasks:
+                    status_color = {
+                        "running": _CYAN,
+                        "completed": _GREEN,
+                        "failed": _RED,
+                        "stopped": _YELLOW,
+                        "pending": _DIM,
+                    }.get(t.status.value, _DIM)
+                    _write(f"  [{_c(_CYAN, t.id)}] {_c(status_color, t.status.value):20s}  {t.prompt[:60]}\n")
+                _write("\n")
+        else:
+            _write(f"\n  {_c(_DIM, 'Task system not available.')}\n\n")
         return True
 
     return False
@@ -1048,6 +1102,15 @@ async def _run_agent(
     if text_started[0]:
         _write("\n")
 
+    # Sync real token data from the agent's budget tracker to the CLI tracker
+    try:
+        budget = getattr(agent, "budget", None)
+        if tracker and budget and hasattr(budget, "total_tokens") and budget.total_tokens > 0:
+            tracker.total_input = budget.total_input
+            tracker.total_output = budget.total_output
+    except (TypeError, AttributeError):
+        pass
+
     # Show completion summary line
     elapsed = time.monotonic() - run_start
     _print_completion_summary(elapsed, tool_count[0], tracker)
@@ -1142,7 +1205,22 @@ async def _interactive(
 
     _last_interrupt: float = 0.0
 
+    # Task completion notification queue
+    _completed_tasks: list = []
+
+    def _task_completed_callback(task):
+        _completed_tasks.append(task)
+
+    if hasattr(agent, "task_manager"):
+        agent.task_manager.on_complete(_task_completed_callback)
+
     while True:
+        # Show any task completion notifications
+        while _completed_tasks:
+            t = _completed_tasks.pop(0)
+            status_color = _GREEN if t.status.value == "completed" else _RED
+            _write(f"\n  {_c(_DIM, 'Task')} {_c(_CYAN, t.id)} {_c(status_color, t.status.value)} -- \"{t.prompt[:60]}\"\n")
+
         try:
             auto_indicator = f" {_c(_YELLOW, 'AUTO')}" if agent.config.auto_mode else ""
             prompt_str = f"{_c(_CYAN, display_dir)}{auto_indicator} {_c(_DIM, '>')} " if _USE_COLOR else f"{display_dir}{' AUTO' if agent.config.auto_mode else ''} > "
@@ -1185,7 +1263,19 @@ async def _interactive(
                     return
                 if result:
                     continue
-            # Not a known command — treat as regular prompt (e.g., file path)
+
+            # Check if it's a skill invocation (e.g., /commit, /review)
+            skill_name = first_word[1:]  # strip leading /
+            if hasattr(agent, "skill_manager"):
+                skill = agent.skill_manager.get(skill_name)
+                if skill and skill.user_invocable:
+                    # Inject skill content as user prompt
+                    skill_content = agent.skill_manager.invoke(skill_name)
+                    _write(f"\n  {_c(_CYAN, f'Invoking skill: {skill_name}')}\n")
+                    line = f"<skill-invocation name=\"{skill_name}\">\n{skill_content}\n</skill-invocation>"
+                    # Fall through to run the agent with this as the prompt
+
+            # Not a known command or skill — treat as regular prompt (e.g., file path)
 
         # Run agent
         try:

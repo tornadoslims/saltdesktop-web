@@ -45,6 +45,10 @@ class MockProvider(ProviderAdapter):
         else:
             yield TextChunk(text="Done.")
 
+    async def quick_query(self, prompt: str, system: str = "", max_tokens: int = 500) -> str:
+        """Side-queries (memory ranking, etc.) return empty -- don't consume scripted responses."""
+        return ""
+
 
 # ---------------------------------------------------------------------------
 # Helper tools

@@ -47,3 +47,5 @@ class AgentConfig:
     # MCP (Model Context Protocol) — auto-discover and connect to MCP servers from .mcp.json
     enable_mcp: bool = True
     mcp_config_path: str = ""  # Override .mcp.json location (default: working_directory/.mcp.json)
+    # Skill directories — additional directories to scan for skills
+    skill_dirs: list = field(default_factory=list)

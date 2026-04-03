@@ -150,3 +150,16 @@ class AnthropicAdapter(ProviderAdapter):
                     "input_tokens": final_message.usage.input_tokens,
                     "output_tokens": final_message.usage.output_tokens,
                 }
+
+    async def quick_query(self, prompt: str, system: str = "", max_tokens: int = 500) -> str:
+        """Non-streaming query using the Anthropic messages API directly (faster)."""
+        try:
+            resp = self.client.messages.create(
+                model=self.model,
+                system=system or "You are a helpful assistant. Be concise.",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=max_tokens,
+            )
+            return resp.content[0].text if resp.content else ""
+        except Exception:
+            return ""
