@@ -103,6 +103,77 @@ def _format_elapsed(seconds: float) -> str:
     return f"({m}m {s}s)"
 
 
+class StatusBar:
+    """Persistent status bar at the bottom of the terminal."""
+
+    def __init__(self, agent):
+        self.agent = agent
+        self._visible = True
+
+    def render(self) -> str:
+        """Build the status bar text."""
+        parts: list[str] = []
+
+        # Permission mode
+        if getattr(self.agent.config, "auto_mode", False):
+            parts.append(f"{_RED}\u25b8\u25b8 auto mode{_RESET}")
+
+        # Active tasks
+        if hasattr(self.agent, "task_manager"):
+            running = sum(
+                1
+                for t in self.agent.task_manager.list_tasks()
+                if t.status.value == "running"
+            )
+            if running:
+                word = "task" if running == 1 else "tasks"
+                parts.append(f"{_CYAN}{running} background {word}{_RESET}")
+
+        # Model
+        model = self.agent.config.model
+        provider = self.agent.config.provider
+        if not model:
+            model = _resolve_default_model(provider)
+        parts.append(f"{_DIM}{_capitalize_provider(provider)}/{model}{_RESET}")
+
+        # Hints
+        parts.append(f"{_DIM}ctrl-c to interrupt \u00b7 /help for commands{_RESET}")
+
+        return " \u00b7 ".join(parts)
+
+    def draw(self) -> None:
+        """Draw the status bar at the bottom of the terminal."""
+        if not _USE_COLOR or not self._visible:
+            return
+
+        rows, cols = shutil.get_terminal_size()
+        bar_text = self.render()
+
+        # Save cursor, move to last line, clear it, write, restore cursor
+        _write(f"\033[s\033[{rows};1H\033[2K  {bar_text}\033[u")
+
+    def clear(self) -> None:
+        """Remove the status bar."""
+        if not _USE_COLOR:
+            return
+        rows, _ = shutil.get_terminal_size()
+        _write(f"\033[s\033[{rows};1H\033[2K\033[u")
+
+
+def _resolve_default_model(provider: str) -> str:
+    """Resolve the default model name for a given provider."""
+    try:
+        if provider == "anthropic":
+            from salt_agent.providers.anthropic import AnthropicAdapter
+            return AnthropicAdapter.DEFAULT_MODEL
+        elif provider == "openai":
+            from salt_agent.providers.openai_provider import OpenAIAdapter
+            return OpenAIAdapter.DEFAULT_MODEL
+    except ImportError:
+        pass
+    return "(unknown)"
+
+
 class Spinner:
     """Animated thinking spinner that runs in a background thread."""
 
@@ -587,7 +658,7 @@ def _print_banner(
     if branch:
         display_dir = f"{display_dir} ({branch})"
 
-    model = config.model or "(default)"
+    model = config.model or _resolve_default_model(config.provider)
     provider_name = _capitalize_provider(config.provider)
     provider_display = f"{provider_name} \u00b7 {model}"
 
@@ -1130,18 +1201,33 @@ def _handle_slash_command(
 
     if command == "/model":
         if arg:
+            old_model = agent.config.model or _resolve_default_model(agent.config.provider)
             agent.config.model = arg
-            _write(f"\n  Model changed to: {_c(_CYAN, arg)}\n\n")
+            # Recreate the provider with the new model
+            try:
+                agent.provider = agent._create_provider()
+                _write(f"\n  Model changed: {_c(_DIM, old_model)} -> {_c(_CYAN, arg)}\n\n")
+            except Exception as e:
+                agent.config.model = old_model
+                _write(f"\n  {_c(_RED, f'Failed to switch model: {e}')}\n\n")
         else:
-            _write(f"\n  Model: {_c(_CYAN, agent.config.model or '(default)')}\n\n")
+            model = agent.config.model or _resolve_default_model(agent.config.provider)
+            provider_name = _capitalize_provider(agent.config.provider)
+            _write(f"\n  Provider: {_c(_CYAN, provider_name)}\n  Model: {_c(_CYAN, model)}\n\n")
         return True
 
     if command == "/provider":
         if arg:
+            old_provider = agent.config.provider
             agent.config.provider = arg
-            _write(f"\n  Provider changed to: {_c(_CYAN, arg)}\n\n")
+            try:
+                agent.provider = agent._create_provider()
+                _write(f"\n  Provider changed: {_c(_DIM, _capitalize_provider(old_provider))} -> {_c(_CYAN, _capitalize_provider(arg))}\n\n")
+            except Exception as e:
+                agent.config.provider = old_provider
+                _write(f"\n  {_c(_RED, f'Failed to switch provider: {e}')}\n\n")
         else:
-            _write(f"\n  Provider: {_c(_CYAN, agent.config.provider)}\n\n")
+            _write(f"\n  Provider: {_c(_CYAN, _capitalize_provider(agent.config.provider))}\n\n")
         return True
 
     if command == "/tokens":
@@ -1312,7 +1398,8 @@ def _handle_slash_command(
     # --- Utility commands ---
     if command == "/doctor":
         _write(f"\n  {_c(_BOLD, 'Health Check')}\n\n")
-        _write(f"  Provider: {agent.config.provider} ({agent.config.model or 'default'})\n")
+        _model = agent.config.model or _resolve_default_model(agent.config.provider)
+        _write(f"  Provider: {_capitalize_provider(agent.config.provider)} ({_model})\n")
         _write(f"  Tools: {len(agent.tools.names())} registered\n")
         memory = getattr(agent, "memory", None)
         if memory and hasattr(memory, "scan_memory_files"):
@@ -2089,6 +2176,9 @@ async def _interactive(
 
     tracker = TokenTracker(model=agent.config.model)
 
+    # Persistent status bar
+    status_bar = StatusBar(agent)
+
     # Enable readline: tab completion, persistent history, keybindings
     _setup_readline(agent)
 
@@ -2117,6 +2207,9 @@ async def _interactive(
             t = _completed_tasks.pop(0)
             status_color = _GREEN if t.status.value == "completed" else _RED
             _write(f"\n  {_c(_DIM, 'Task')} {_c(_CYAN, t.id)} {_c(status_color, t.status.value)} -- \"{t.prompt[:60]}\"\n")
+
+        # Draw status bar before prompt
+        status_bar.draw()
 
         try:
             auto_indicator = f" {_c(_YELLOW, 'AUTO')}" if agent.config.auto_mode else ""
@@ -2190,6 +2283,9 @@ async def _interactive(
                     # Fall through to run the agent with this as the prompt
 
             # Not a known command or skill — treat as regular prompt (e.g., file path)
+
+        # Clear status bar before running agent (avoid overlap with output)
+        status_bar.clear()
 
         # Run agent
         try:

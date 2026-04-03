@@ -10,10 +10,12 @@ import pytest
 from salt_agent.cli import (
     _build_parser,
     _resolve_api_key,
+    _resolve_default_model,
     _tool_brief,
     _tool_result_brief,
     _abbreviate_path,
     _handle_slash_command,
+    StatusBar,
     TokenTracker,
     __version__,
 )
@@ -590,3 +592,154 @@ class TestMultilineInput:
         monkeypatch.setattr("builtins.input", raise_interrupt)
         result = _read_multiline_backtick()
         assert result == ""
+
+
+# ---------------------------------------------------------------------------
+# StatusBar
+# ---------------------------------------------------------------------------
+
+class TestStatusBar:
+    def _make_mock_agent(self, auto_mode=False, model="", provider="openai"):
+        agent = MagicMock()
+        agent.config = MagicMock()
+        agent.config.auto_mode = auto_mode
+        agent.config.model = model
+        agent.config.provider = provider
+        agent.task_manager.list_tasks.return_value = []
+        return agent
+
+    def test_render_default_mode(self):
+        agent = self._make_mock_agent()
+        bar = StatusBar(agent)
+        text = bar.render()
+        assert "OpenAI" in text
+        assert "/help" in text
+
+    def test_render_auto_mode(self):
+        agent = self._make_mock_agent(auto_mode=True)
+        bar = StatusBar(agent)
+        text = bar.render()
+        assert "auto mode" in text
+
+    def test_render_with_model(self):
+        agent = self._make_mock_agent(model="gpt-4o-mini")
+        bar = StatusBar(agent)
+        text = bar.render()
+        assert "gpt-4o-mini" in text
+
+    def test_render_with_running_tasks(self):
+        agent = self._make_mock_agent()
+        task = MagicMock()
+        task.status.value = "running"
+        agent.task_manager.list_tasks.return_value = [task]
+        bar = StatusBar(agent)
+        text = bar.render()
+        assert "1 background task" in text
+
+    def test_render_multiple_running_tasks(self):
+        agent = self._make_mock_agent()
+        tasks = [MagicMock() for _ in range(3)]
+        for t in tasks:
+            t.status.value = "running"
+        agent.task_manager.list_tasks.return_value = tasks
+        bar = StatusBar(agent)
+        text = bar.render()
+        assert "3 background tasks" in text
+
+    def test_render_no_running_tasks(self):
+        agent = self._make_mock_agent()
+        task = MagicMock()
+        task.status.value = "completed"
+        agent.task_manager.list_tasks.return_value = [task]
+        bar = StatusBar(agent)
+        text = bar.render()
+        assert "background" not in text
+
+    def test_draw_noop_when_not_visible(self):
+        agent = self._make_mock_agent()
+        bar = StatusBar(agent)
+        bar._visible = False
+        # Should not raise
+        bar.draw()
+
+    def test_clear_noop_when_no_color(self, monkeypatch):
+        import salt_agent.cli as cli_mod
+        monkeypatch.setattr(cli_mod, "_USE_COLOR", False)
+        agent = self._make_mock_agent()
+        bar = StatusBar(agent)
+        # Should not raise
+        bar.clear()
+
+
+# ---------------------------------------------------------------------------
+# _resolve_default_model
+# ---------------------------------------------------------------------------
+
+class TestResolveDefaultModel:
+    def test_openai_default(self):
+        model = _resolve_default_model("openai")
+        assert model  # non-empty
+        assert model != "(unknown)"
+
+    def test_anthropic_default(self):
+        model = _resolve_default_model("anthropic")
+        assert model  # non-empty
+        assert "claude" in model.lower()
+
+    def test_unknown_provider(self):
+        model = _resolve_default_model("nonexistent_provider")
+        assert model == "(unknown)"
+
+
+# ---------------------------------------------------------------------------
+# /model and /provider slash commands (enhanced)
+# ---------------------------------------------------------------------------
+
+class TestModelProviderCommands:
+    def _make_mock_agent(self):
+        agent = MagicMock()
+        agent.config = MagicMock()
+        agent.config.model = ""
+        agent.config.provider = "openai"
+        agent._create_provider.return_value = MagicMock()
+        return agent
+
+    def test_model_shows_actual_default(self, capsys):
+        agent = self._make_mock_agent()
+        tracker = TokenTracker()
+        result = _handle_slash_command("/model", agent, tracker, False)
+        assert result is True
+        # Should not show "(default)"
+        captured = capsys.readouterr()
+        assert "(default)" not in captured.out
+
+    def test_model_change_recreates_provider(self):
+        agent = self._make_mock_agent()
+        tracker = TokenTracker()
+        result = _handle_slash_command("/model gpt-4o-mini", agent, tracker, False)
+        assert result is True
+        assert agent.config.model == "gpt-4o-mini"
+        agent._create_provider.assert_called_once()
+
+    def test_model_change_failure_reverts(self):
+        agent = self._make_mock_agent()
+        agent._create_provider.side_effect = ValueError("bad model")
+        tracker = TokenTracker()
+        _handle_slash_command("/model bad-model", agent, tracker, False)
+        # Model should be reverted (the old default model string)
+        assert agent.config.model != "bad-model"
+
+    def test_provider_change_recreates_provider(self):
+        agent = self._make_mock_agent()
+        tracker = TokenTracker()
+        result = _handle_slash_command("/provider anthropic", agent, tracker, False)
+        assert result is True
+        assert agent.config.provider == "anthropic"
+        agent._create_provider.assert_called_once()
+
+    def test_provider_change_failure_reverts(self):
+        agent = self._make_mock_agent()
+        agent._create_provider.side_effect = ValueError("bad provider")
+        tracker = TokenTracker()
+        _handle_slash_command("/provider bad", agent, tracker, False)
+        assert agent.config.provider == "openai"
