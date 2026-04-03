@@ -45,11 +45,15 @@ class SubagentManager:
         prompt: str,
         mode: str = "general",
         max_turns: int = 15,
+        event_callback=None,
     ) -> dict:
         """Spawn a fresh subagent with zero context.
 
         Use for exploration, verification, or focused tasks that don't need
         the parent's conversation history.
+
+        If *event_callback* is provided, every intermediate event from the
+        child agent will be forwarded to it so the CLI can display activity.
         """
         factory = _get_create_agent()
         child = factory(
@@ -62,7 +66,7 @@ class SubagentManager:
             persist=False,
         )
 
-        result_text = await _run_agent(child, prompt)
+        result_text = await _run_agent(child, prompt, event_callback=event_callback)
 
         child_record = {
             "type": "fresh",
@@ -123,12 +127,22 @@ class SubagentManager:
         return child_record
 
 
-async def _run_agent(agent, prompt: str) -> str:
-    """Run an agent to completion and collect the final text."""
+async def _run_agent(agent, prompt: str, event_callback=None) -> str:
+    """Run an agent to completion and collect the final text.
+
+    If *event_callback* is provided, every event is forwarded to it so the
+    caller (typically the CLI) can render subagent activity in real time.
+    """
     from salt_agent.events import AgentComplete, TextChunk
 
     result_text = ""
     async for event in agent.run(prompt):
+        # Forward intermediate events to the callback (if any)
+        if event_callback is not None:
+            try:
+                event_callback(event)
+            except Exception:
+                pass  # Never let a display callback break the agent
         if isinstance(event, AgentComplete):
             result_text = event.final_text
         elif isinstance(event, TextChunk):

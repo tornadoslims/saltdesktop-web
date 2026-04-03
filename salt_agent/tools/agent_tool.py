@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from salt_agent.tools.base import Tool, ToolDefinition, ToolParam
 
@@ -20,8 +20,13 @@ class AgentTool(Tool):
     focused research, or delegating independent subtasks.
     """
 
-    def __init__(self, subagent_manager: SubagentManager) -> None:
+    def __init__(
+        self,
+        subagent_manager: SubagentManager,
+        event_callback: Callable | None = None,
+    ) -> None:
         self._manager = subagent_manager
+        self._event_callback = event_callback
 
     def definition(self) -> ToolDefinition:
         return ToolDefinition(
@@ -58,10 +63,19 @@ class AgentTool(Tool):
             if loop and loop.is_running():
                 with concurrent.futures.ThreadPoolExecutor() as pool:
                     result = pool.submit(
-                        asyncio.run, self._manager.spawn_fresh(prompt, mode)
+                        asyncio.run,
+                        self._manager.spawn_fresh(
+                            prompt, mode,
+                            event_callback=self._event_callback,
+                        ),
                     ).result(timeout=300)
             else:
-                result = asyncio.run(self._manager.spawn_fresh(prompt, mode))
+                result = asyncio.run(
+                    self._manager.spawn_fresh(
+                        prompt, mode,
+                        event_callback=self._event_callback,
+                    )
+                )
 
             return result.get("result", "Subagent completed with no output")
         except Exception as e:

@@ -1071,7 +1071,8 @@ button { font: inherit; cursor: pointer; border: none; background: none; color: 
   flex: 1;
   padding: 10px 14px;
   background: var(--bg-input);
-  border: 1px solid var(--border);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
   border-radius: var(--radius);
   color: var(--text);
   font-size: 14px;

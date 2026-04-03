@@ -123,11 +123,14 @@ class Spinner:
             return  # Already stopped — don't write CLEAR_LINE again
         self._running = False
         if self._thread:
-            self._thread.join(timeout=1)
+            self._thread.join(timeout=2)
             self._thread = None
             # Only clear the spinner line on the FIRST stop
             if _USE_COLOR:
                 _write(_CLEAR_LINE)
+            # Tiny settle so the terminal flushes the clear before the next
+            # write (prevents flicker / partial line remnants).
+            time.sleep(0.02)
 
     def note_event(self) -> None:
         """Record that an event was received (resets heartbeat timer)."""
@@ -822,8 +825,13 @@ def _render_event(
     text_started: list[bool] | None = None,
     tool_count: list[int] | None = None,
     last_tool_input: dict | None = None,
+    indent: str = "",
 ) -> None:
-    """Render a single agent event to the terminal."""
+    """Render a single agent event to the terminal.
+
+    *indent* is prepended to every output line -- used to visually nest
+    subagent events under the parent's tool call.
+    """
 
     # Notify spinner of activity (resets heartbeat timer)
     if spinner:
@@ -838,6 +846,10 @@ def _render_event(
         # Render markdown inline - accumulate would be better but chunk-by-chunk
         # works for streaming. We apply inline formatting to each chunk.
         rendered = _render_inline(event.text)
+        if indent:
+            # For subagent text, only indent at the very start or after newlines
+            rendered = rendered.replace("\n", f"\n{indent}")
+            # Only write prefix if this is a fresh line
         _write(rendered)
 
     elif isinstance(event, ToolStart):
@@ -850,13 +862,13 @@ def _render_event(
             last_tool_input.clear()
             last_tool_input.update({"_name": event.tool_name, **event.tool_input})
         brief = _tool_brief(event.tool_name, event.tool_input)
-        _write(f"\n  {_c(_CYAN, f'\u26a1 {brief}')}\n")
+        _write(f"\n{indent}  {_c(_CYAN, f'\u26a1 {brief}')}\n")
         if verbose:
             for k, v in event.tool_input.items():
                 val = str(v)
                 if len(val) > 120:
                     val = val[:117] + "..."
-                _write(f"    {_c(_DIM, f'{k}: {val}')}\n")
+                _write(f"{indent}    {_c(_DIM, f'{k}: {val}')}\n")
 
     elif isinstance(event, ToolEnd):
         name_lower = event.tool_name.lower()
@@ -865,16 +877,16 @@ def _render_event(
         if name_lower in ("edit", "multi_edit") and event.success and last_tool_input:
             colored = _edit_colored_summary(last_tool_input, event.result)
             if colored:
-                _write(f"    {_c(_DIM, '\u2713')} {colored}\n")
+                _write(f"{indent}    {_c(_DIM, '\u2713')} {colored}\n")
             else:
                 summary = _tool_result_brief(event.tool_name, event.result, event.success)
-                _write(f"    {_c(_DIM + _GREEN, f'\u2713 {summary}')}\n")
+                _write(f"{indent}    {_c(_DIM + _GREEN, f'\u2713 {summary}')}\n")
         elif event.success:
             summary = _tool_result_brief(event.tool_name, event.result, event.success)
-            _write(f"    {_c(_DIM + _GREEN, f'\u2713 {summary}')}\n")
+            _write(f"{indent}    {_c(_DIM + _GREEN, f'\u2713 {summary}')}\n")
         else:
             summary = _tool_result_brief(event.tool_name, event.result, event.success)
-            _write(f"    {_c(_RED, f'\u2717 {summary}')}\n")
+            _write(f"{indent}    {_c(_RED, f'\u2717 {summary}')}\n")
 
         # Verbose: show file tree for list_files, or raw output for others
         if verbose and event.result.strip():
@@ -882,12 +894,12 @@ def _render_event(
                 file_list = [l for l in event.result.strip().split("\n") if l.strip()]
                 tree = _format_file_tree(file_list)
                 for tl in tree:
-                    _write(f"    {_c(_DIM, tl)}\n")
+                    _write(f"{indent}    {_c(_DIM, tl)}\n")
             else:
                 for line in event.result.strip().splitlines()[:10]:
-                    _write(f"    {_c(_DIM, f'  {line}')}\n")
+                    _write(f"{indent}    {_c(_DIM, f'  {line}')}\n")
                 if len(event.result.strip().splitlines()) > 10:
-                    _write(f"    {_c(_DIM, f'  ... ({len(event.result.strip().splitlines())} lines)')}\n")
+                    _write(f"{indent}    {_c(_DIM, f'  ... ({len(event.result.strip().splitlines())} lines)')}\n")
         # Don't restart spinner — it erases streaming text
         # The spinner only runs while waiting for the first response
 
@@ -895,9 +907,9 @@ def _render_event(
         if spinner:
             spinner.stop()
         if event.recoverable:
-            _write(f"\n  {_c(_YELLOW, f'\u274c {event.error}')}\n")
+            _write(f"\n{indent}  {_c(_YELLOW, f'\u274c {event.error}')}\n")
         else:
-            _write(f"\n  {_c(_RED, f'\u274c {event.error}')}\n")
+            _write(f"\n{indent}  {_c(_RED, f'\u274c {event.error}')}\n")
 
     elif isinstance(event, AgentComplete):
         if tracker:
@@ -1100,6 +1112,23 @@ async def _interactive(
 
     agent.hooks.on("pre_tool_use", _diff_preview_hook)
 
+    # --- Wire up subagent event forwarding ---
+    agent_tool = agent.tools.get("agent")
+    if agent_tool is not None:
+        def _subagent_event_handler(event):
+            """Render subagent events indented under the parent's tool line."""
+            _render_event(
+                event,
+                verbose=verbose,
+                spinner=None,   # subagent manages its own spinner
+                tracker=None,
+                text_started=[True],
+                tool_count=[0],
+                last_tool_input={},
+                indent="    ",
+            )
+        agent_tool._event_callback = _subagent_event_handler
+
     # Print banner
     tool_names = sorted(agent.tools.names())
     mcp_servers = agent.mcp_manager.server_names if agent.mcp_manager and agent.mcp_manager.is_started else None
@@ -1118,6 +1147,8 @@ async def _interactive(
     wd = os.path.abspath(agent.config.working_directory)
     display_dir = wd.replace(home, "~") if wd.startswith(home) else wd
 
+    _last_interrupt: float = 0.0
+
     while True:
         try:
             auto_indicator = f" {_c(_YELLOW, 'AUTO')}" if agent.config.auto_mode else ""
@@ -1127,7 +1158,12 @@ async def _interactive(
             _write(f"\n{_c(_DIM, 'Goodbye!')}\n")
             return
         except KeyboardInterrupt:
-            _write("\n")
+            now = time.monotonic()
+            if now - _last_interrupt < 1.0:
+                _write(f"\n{_c(_DIM, 'Goodbye!')}\n")
+                return
+            _last_interrupt = now
+            _write(f"\n  {_c(_DIM, 'Press Ctrl+C again to exit.')}\n")
             continue
 
         # Multi-line support: lines ending with backslash
@@ -1173,7 +1209,10 @@ async def _interactive(
                 tracker=tracker,
             )
         except KeyboardInterrupt:
-            _write(f"\n  {_c(_DIM, 'Interrupted.')}\n\n")
+            _write(f"\n  {_c(_YELLOW, 'Cancelled.')}\n\n")
+            continue
+        except asyncio.CancelledError:
+            _write(f"\n  {_c(_YELLOW, 'Cancelled.')}\n\n")
             continue
         except Exception as e:
             _write(f"\n  {_c(_RED, f'\u274c {e}')}\n\n")

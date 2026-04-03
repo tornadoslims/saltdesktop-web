@@ -202,7 +202,7 @@ class TestAgentTool:
     def test_execute_calls_spawn_fresh(self):
         mgr = MagicMock()
 
-        async def fake_spawn(prompt, mode):
+        async def fake_spawn(prompt, mode, event_callback=None):
             return {"result": "Subagent says hello"}
 
         mgr.spawn_fresh = fake_spawn
@@ -214,7 +214,7 @@ class TestAgentTool:
     def test_execute_handles_error(self):
         mgr = MagicMock()
 
-        async def failing_spawn(prompt, mode):
+        async def failing_spawn(prompt, mode, event_callback=None):
             raise RuntimeError("API error")
 
         mgr.spawn_fresh = failing_spawn
@@ -226,7 +226,7 @@ class TestAgentTool:
     def test_execute_default_mode(self):
         mgr = MagicMock()
 
-        async def fake_spawn(prompt, mode):
+        async def fake_spawn(prompt, mode, event_callback=None):
             return {"result": f"mode={mode}"}
 
         mgr.spawn_fresh = fake_spawn
