@@ -40,6 +40,8 @@ class AgentConfig:
     fallback_model: str = ""
     # Plan mode — agent must write a plan before executing tools
     plan_mode: bool = False
+    # Coordinator mode — strips write/execute tools, keeps delegation tools only
+    coordinator_mode: bool = False
     # Git tools — register native git status/diff/commit tools
     include_git_tools: bool = True
     # Plugin directories — discover and load SaltPlugin subclasses from these dirs

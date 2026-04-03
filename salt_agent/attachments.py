@@ -124,9 +124,21 @@ class AttachmentAssembler:
     def _modified_files_warning(self) -> str:
         """Warn if files were modified externally since the agent read them."""
         read_tool = self.agent.tools.get("read")
-        if not read_tool or not hasattr(read_tool, "files_read"):
+        if not read_tool or not hasattr(read_tool, "_read_mtimes"):
             return ""
-        # Placeholder: track mtime at read time in a future enhancement
+        modified = []
+        for path, read_mtime in read_tool._read_mtimes.items():
+            try:
+                current_mtime = Path(path).stat().st_mtime
+                if current_mtime > read_mtime:
+                    modified.append(path)
+            except (OSError, FileNotFoundError):
+                pass
+        if modified:
+            return self._wrap(
+                "WARNING: Files modified since you last read them:\n"
+                + "\n".join(f"  - {f}" for f in modified)
+            )
         return ""
 
     def _mcp_status(self) -> str:

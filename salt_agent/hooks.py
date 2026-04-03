@@ -62,6 +62,36 @@ class HookEngine:
                 pass
         return HookResult(action="allow")
 
+    def register_shell_hook(self, event: str, command: str) -> None:
+        """Register a shell command as a hook for an event type."""
+        self.on(event, ShellHook(command))
+
+
+class ShellHook:
+    """A hook that executes a shell command. Input/output via JSON stdin/stdout."""
+
+    def __init__(self, command: str):
+        self.command = command
+
+    def __call__(self, data: dict) -> HookResult | None:
+        import subprocess
+        import json
+        try:
+            result = subprocess.run(
+                self.command, shell=True,
+                input=json.dumps(data),
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.stdout.strip():
+                response = json.loads(result.stdout)
+                return HookResult(
+                    action=response.get("action", "allow"),
+                    reason=response.get("reason", ""),
+                )
+        except Exception:
+            pass
+        return None
+
 
 # Event types
 HOOK_EVENTS = [

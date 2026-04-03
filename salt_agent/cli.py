@@ -18,6 +18,7 @@ import os
 import re
 import shutil
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -637,20 +638,48 @@ def _print_banner(
 # ---------------------------------------------------------------------------
 
 _SLASH_COMMANDS = {
-    "/help": "Show available commands",
-    "/clear": "Clear conversation history",
-    "/compact": "Compress context (summarize old turns)",
-    "/mode": "Show/change agent mode",
-    "/tools": "List available tools",
-    "/skills": "List available skills",
-    "/cost": "Show token usage this session",
+    # Session
+    "/sessions": "List recent sessions with titles and dates",
+    "/resume": "Resume a previous session: /resume [id]",
     "/history": "Show conversation summary",
+    "/clear": "Clear conversation history",
+    "/search": "Search past sessions: /search <query>",
+    # Code
+    "/commit": "Invoke the commit skill",
+    "/review": "Invoke the review skill",
+    "/diff": "Show git diff output",
+    "/status": "Show git status output",
+    "/branch": "Show current git branch",
+    "/log": "Show last n git commits: /log [n]",
+    "/stash": "Run git stash",
+    "/undo": "Rewind file changes (uses file_history)",
+    # Agent
+    "/tasks": "List background tasks and their status",
+    "/model": "Show/change current model: /model [name]",
+    "/provider": "Show/change current provider: /provider [name]",
+    "/tokens": "Show token usage stats",
+    "/budget": "Show budget tracker stats",
+    "/compact": "Force context compaction now",
+    "/cost": "Show token usage this session",
+    # Memory
+    "/memory": "List memory files",
+    "/memories": "List memory files",
+    "/forget": "Delete a memory file: /forget <file>",
+    # Mode
     "/auto": "Toggle auto mode (skip all permission prompts)",
     "/plan": "Enable plan mode (agent must plan before acting)",
     "/approve": "Approve plan and let agent proceed",
-    "/search": "Search past sessions: /search <query>",
     "/verify": "Spawn verification specialist to review code",
-    "/tasks": "List background tasks and their status",
+    "/mode": "Show/change agent mode",
+    "/coordinator": "Enter coordinator mode",
+    # Utility
+    "/doctor": "Run health checks",
+    "/version": "Show version",
+    "/config": "Get/set config: /config [key] [value]",
+    "/export": "Export conversation as markdown",
+    "/tools": "List available tools",
+    "/skills": "List available skills",
+    "/help": "Show available commands",
     "/quit": "Exit",
 }
 
@@ -664,18 +693,124 @@ def _handle_slash_command(
     """Handle a slash command. Returns True if handled, None to quit, False if not a command."""
     parts = cmd.strip().split(None, 1)
     command = parts[0].lower()
-    # arg = parts[1] if len(parts) > 1 else ""
+    arg = parts[1] if len(parts) > 1 else ""
 
+    # --- Quit ---
+    if command in ("/quit", "/exit", "/q"):
+        return None
+
+    # --- Help (grouped by category) ---
     if command == "/help":
         _write("\n")
         _write(f"  {_c(_BOLD, 'Commands')}\n\n")
-        for slash, desc in _SLASH_COMMANDS.items():
-            _write(f"  {_c(_CYAN, slash):20s}  {_c(_DIM, desc)}\n")
+        categories = {
+            "Session":  ["/sessions", "/resume", "/history", "/clear", "/search"],
+            "Code":     ["/commit", "/review", "/diff", "/status", "/branch", "/log", "/stash", "/undo"],
+            "Agent":    ["/tasks", "/model", "/provider", "/tokens", "/budget", "/compact", "/cost"],
+            "Memory":   ["/memory", "/forget", "/memories"],
+            "Mode":     ["/auto", "/plan", "/approve", "/verify", "/coordinator", "/mode"],
+            "Utility":  ["/doctor", "/version", "/config", "/export", "/skills", "/tools", "/help", "/quit"],
+        }
+        for cat, cmds in categories.items():
+            _write(f"  {_c(_BOLD, cat):12s} {_c(_DIM, ' '.join(cmds))}\n")
         _write("\n")
         return True
 
-    if command in ("/quit", "/exit", "/q"):
-        return None
+    # --- Session commands ---
+    if command == "/sessions":
+        if agent.persistence:
+            sessions = agent.persistence.list_sessions()
+            if sessions:
+                _write(f"\n  {_c(_BOLD, 'Recent Sessions')}\n\n")
+                for s in sessions[:20]:
+                    sid = s["session_id"][:12]
+                    from datetime import datetime
+                    try:
+                        mtime = datetime.fromtimestamp(s["modified"])
+                        ts = mtime.strftime("%Y-%m-%d %H:%M")
+                    except (KeyError, TypeError, OSError):
+                        ts = "unknown"
+                    size_kb = s.get("size", 0) / 1024
+                    _write(f"  {_c(_CYAN, sid)}  {_c(_DIM, ts)}  {_c(_DIM, f'{size_kb:.0f}KB')}\n")
+            else:
+                _write(f"\n  {_c(_DIM, 'No sessions found.')}\n")
+            _write("\n")
+        else:
+            _write(f"\n  {_c(_DIM, 'Session persistence not enabled.')}\n\n")
+        return True
+
+    if command == "/resume":
+        if agent.persistence:
+            if arg:
+                sessions = agent.persistence.list_sessions()
+                match = None
+                for s in sessions:
+                    if s["session_id"].startswith(arg):
+                        match = s
+                        break
+                if match:
+                    import json as _json
+                    try:
+                        last_checkpoint = None
+                        with open(match["path"]) as f:
+                            for line in f:
+                                entry = _json.loads(line.strip())
+                                if entry.get("type") == "checkpoint":
+                                    last_checkpoint = entry
+                        if last_checkpoint and "messages" in last_checkpoint:
+                            agent._conversation_messages = list(last_checkpoint["messages"])
+                            sid = match["session_id"][:12]
+                            _write(f"\n  {_c(_GREEN, f'Resumed session {sid}')}\n\n")
+                        else:
+                            _write(f"\n  {_c(_RED, 'No checkpoint found in that session.')}\n\n")
+                    except Exception as e:
+                        _write(f"\n  {_c(_RED, f'Failed to resume: {e}')}\n\n")
+                else:
+                    _write(f"\n  {_c(_RED, f'No session matching \"{arg}\"')}\n\n")
+            else:
+                checkpoint = agent.persistence.load_last_checkpoint()
+                if checkpoint and "messages" in checkpoint:
+                    agent._conversation_messages = list(checkpoint["messages"])
+                    turns = len([m for m in checkpoint["messages"] if m.get("role") == "user"])
+                    _write(f"\n  {_c(_GREEN, f'Resumed last session ({turns} turns)')}\n\n")
+                else:
+                    _write(f"\n  {_c(_DIM, 'No previous session to resume.')}\n\n")
+        else:
+            _write(f"\n  {_c(_DIM, 'Session persistence not enabled.')}\n\n")
+        return True
+
+    if command == "/history":
+        msgs = getattr(agent, "_conversation_messages", [])
+        if not msgs:
+            _write(f"\n  {_c(_DIM, 'No conversation history.')}\n\n")
+        else:
+            _write(f"\n  {_c(_BOLD, 'Conversation Summary')}\n\n")
+            user_count = 0
+            assistant_count = 0
+            tool_uses = 0
+            for m in msgs:
+                role = m.get("role", "")
+                if role == "user":
+                    user_count += 1
+                elif role == "assistant":
+                    assistant_count += 1
+                content = m.get("content", "")
+                if isinstance(content, list):
+                    tool_uses += sum(1 for b in content if isinstance(b, dict) and b.get("type") == "tool_use")
+            _write(f"  Messages: {len(msgs)} ({user_count} user, {assistant_count} assistant)\n")
+            _write(f"  Tool uses: {tool_uses}\n")
+            user_msgs = [m for m in msgs if m.get("role") == "user"]
+            if user_msgs:
+                _write(f"\n  {_c(_DIM, 'Recent prompts:')}\n")
+                for m in user_msgs[-5:]:
+                    content = m.get("content", "")
+                    if isinstance(content, str):
+                        preview = content[:80]
+                        if len(content) > 80:
+                            preview += "..."
+                        _write(f"    {_c(_DIM, '>')} {preview}\n")
+            _write("\n")
+        return True
 
     if command == "/clear":
         from salt_agent.context import ContextManager
@@ -687,6 +822,404 @@ def _handle_slash_command(
             agent.context.set_system(agent.config.system_prompt)
         agent.clear_conversation()
         _write(f"\n  {_c(_DIM, 'Context cleared.')}\n\n")
+        return True
+
+    if command == "/search":
+        query = arg
+        if not query:
+            _write(f"\n  {_c(_DIM, 'Usage: /search <query>')}\n\n")
+            return True
+        if agent.persistence:
+            results = agent.persistence.search_sessions(query)
+            if results:
+                _write(f"\n  {_c(_BOLD, f'Search results for \"{query}\"')}\n\n")
+                for r in results:
+                    ts = r.get("timestamp", "")[:19]
+                    sid = r["session_id"][:12]
+                    _write(f"  {_c(_CYAN, sid)} {_c(_DIM, ts)} [{r['type']}]\n")
+                    preview = r["preview"][:120]
+                    if len(r["preview"]) > 120:
+                        preview += "..."
+                    _write(f"    {_c(_DIM, preview)}\n")
+            else:
+                _write(f"\n  {_c(_DIM, f'No results for \"{query}\"')}\n")
+            _write("\n")
+        else:
+            _write(f"\n  {_c(_DIM, 'Session persistence not enabled.')}\n\n")
+        return True
+
+    # --- Code commands (git) ---
+    if command == "/diff":
+        result = subprocess.run(
+            ["git", "diff"], cwd=getattr(agent.config, "working_directory", "."),
+            capture_output=True, text=True,
+        )
+        output = result.stdout or "No changes."
+        _write(f"\n{output}\n\n")
+        return True
+
+    if command == "/status":
+        result = subprocess.run(
+            ["git", "status", "--short"], cwd=getattr(agent.config, "working_directory", "."),
+            capture_output=True, text=True,
+        )
+        output = result.stdout or "Working tree clean."
+        _write(f"\n{output}\n")
+        return True
+
+    if command == "/branch":
+        result = subprocess.run(
+            ["git", "branch", "--show-current"], cwd=getattr(agent.config, "working_directory", "."),
+            capture_output=True, text=True,
+        )
+        branch = result.stdout.strip() or "unknown"
+        _write(f"\n  Branch: {_c(_CYAN, branch)}\n\n")
+        return True
+
+    if command == "/log":
+        n = "5"
+        if arg and arg.strip().isdigit():
+            n = arg.strip()
+        result = subprocess.run(
+            ["git", "log", "--oneline", f"-{n}"],
+            cwd=getattr(agent.config, "working_directory", "."),
+            capture_output=True, text=True,
+        )
+        output = result.stdout or "No commits."
+        _write(f"\n{output}\n")
+        return True
+
+    if command == "/stash":
+        result = subprocess.run(
+            ["git", "stash"], cwd=getattr(agent.config, "working_directory", "."),
+            capture_output=True, text=True,
+        )
+        output = result.stdout.strip() or result.stderr.strip() or "Done."
+        _write(f"\n  {output}\n\n")
+        return True
+
+    if command == "/undo":
+        file_history = getattr(agent, "file_history", None)
+        if file_history and hasattr(file_history, "undo_last"):
+            try:
+                undone = file_history.undo_last()
+                if undone:
+                    _write(f"\n  {_c(_GREEN, f'Undone: {undone}')}\n\n")
+                else:
+                    _write(f"\n  {_c(_DIM, 'Nothing to undo.')}\n\n")
+            except Exception as e:
+                _write(f"\n  {_c(_RED, f'Undo failed: {e}')}\n\n")
+        else:
+            _write(f"\n  {_c(_DIM, 'File history not available.')}\n\n")
+        return True
+
+    if command == "/commit":
+        if hasattr(agent, "skill_manager"):
+            try:
+                content = agent.skill_manager.invoke("commit")
+                if content:
+                    _write(f"\n  {_c(_CYAN, 'Invoking commit skill...')}\n")
+                    asyncio.run(_run_agent(agent, f"Follow these instructions:\n\n{content}", tracker=tracker))
+                else:
+                    _write(f"\n  {_c(_DIM, 'Commit skill not available.')}\n\n")
+            except Exception as e:
+                _write(f"\n  {_c(_RED, f'Commit failed: {e}')}\n\n")
+        else:
+            _write(f"\n  {_c(_DIM, 'Skill system not available.')}\n\n")
+        return True
+
+    if command == "/review":
+        if hasattr(agent, "skill_manager"):
+            try:
+                content = agent.skill_manager.invoke("review")
+                if content:
+                    _write(f"\n  {_c(_CYAN, 'Invoking review skill...')}\n")
+                    asyncio.run(_run_agent(agent, f"Follow these instructions:\n\n{content}", tracker=tracker))
+                else:
+                    _write(f"\n  {_c(_DIM, 'Review skill not available.')}\n\n")
+            except Exception as e:
+                _write(f"\n  {_c(_RED, f'Review failed: {e}')}\n\n")
+        else:
+            _write(f"\n  {_c(_DIM, 'Skill system not available.')}\n\n")
+        return True
+
+    # --- Agent commands ---
+    if command == "/tasks":
+        if hasattr(agent, "task_manager"):
+            tasks = agent.task_manager.list_tasks()
+            if not tasks:
+                _write(f"\n  {_c(_DIM, 'No background tasks.')}\n\n")
+            else:
+                _write(f"\n  {_c(_BOLD, 'Background Tasks')}\n\n")
+                for t in tasks:
+                    status_color = {
+                        "running": _CYAN,
+                        "completed": _GREEN,
+                        "failed": _RED,
+                        "stopped": _YELLOW,
+                        "pending": _DIM,
+                    }.get(t.status.value, _DIM)
+                    _write(f"  [{_c(_CYAN, t.id)}] {_c(status_color, t.status.value):20s}  {t.prompt[:60]}\n")
+                _write("\n")
+        else:
+            _write(f"\n  {_c(_DIM, 'Task system not available.')}\n\n")
+        return True
+
+    if command == "/model":
+        if arg:
+            agent.config.model = arg
+            _write(f"\n  Model changed to: {_c(_CYAN, arg)}\n\n")
+        else:
+            _write(f"\n  Model: {_c(_CYAN, agent.config.model or '(default)')}\n\n")
+        return True
+
+    if command == "/provider":
+        if arg:
+            agent.config.provider = arg
+            _write(f"\n  Provider changed to: {_c(_CYAN, arg)}\n\n")
+        else:
+            _write(f"\n  Provider: {_c(_CYAN, agent.config.provider)}\n\n")
+        return True
+
+    if command == "/tokens":
+        _write("\n")
+        _write(f"  {_c(_BOLD, 'Token Usage')}\n\n")
+        _write(f"  Input:  {tracker.total_input:,}\n")
+        _write(f"  Output: {tracker.total_output:,}\n")
+        _write(f"  Total:  {tracker.total:,}\n")
+        cost = tracker.estimated_cost
+        _write(f"  Est. cost: ${cost:.4f}\n")
+        _write("\n")
+        return True
+
+    if command == "/budget":
+        _write("\n")
+        budget = getattr(agent, "budget", None)
+        if budget and hasattr(budget, "total_tokens"):
+            _write(f"  {_c(_BOLD, 'Budget Tracker')}\n\n")
+            _write(f"  Total tokens: {budget.total_tokens:,}\n")
+            if hasattr(budget, "total_input"):
+                _write(f"  Input:  {budget.total_input:,}\n")
+            if hasattr(budget, "total_output"):
+                _write(f"  Output: {budget.total_output:,}\n")
+            if hasattr(budget, "format"):
+                _write(f"  {budget.format()}\n")
+        else:
+            _write(f"  {_c(_DIM, 'No budget data available.')}\n")
+        _write("\n")
+        return True
+
+    if command == "/compact":
+        try:
+            from salt_agent.compaction import compact_context
+            msgs = getattr(agent, "_conversation_messages", [])
+            old_count = len(msgs)
+            if old_count < 4:
+                _write(f"\n  {_c(_DIM, 'Too few messages to compact.')}\n\n")
+                return True
+            system_prompt = getattr(agent.context, "system_prompt", "") or ""
+            agent._conversation_messages = asyncio.run(compact_context(
+                agent._conversation_messages, system_prompt,
+                agent.config, agent.provider,
+            ))
+            new_count = len(agent._conversation_messages)
+            _write(f"\n  Compacted: {old_count} messages -> {new_count} messages\n\n")
+        except Exception as e:
+            _write(f"\n  {_c(_RED, f'Compaction failed: {e}')}\n\n")
+        return True
+
+    if command == "/cost":
+        _write("\n")
+        _budget_shown = False
+        try:
+            budget = getattr(agent, "budget", None)
+            if budget and hasattr(budget, "total_tokens") and budget.total_tokens > 0:
+                info = budget.format()
+                stats = budget.get_stats()
+                _write(f"  {_c(_BOLD, 'Token Usage')}\n\n")
+                _write(f"  {_c(_DIM, info)}\n")
+                turn_count = stats["turns"]
+                _write(f"  {_c(_DIM, f'Turns: {turn_count}')}\n")
+                _budget_shown = True
+        except (TypeError, AttributeError):
+            pass
+        if not _budget_shown:
+            info = tracker.format()
+            if info:
+                _write(f"  {_c(_DIM, info)}\n")
+            else:
+                _write(f"  {_c(_DIM, 'No tokens used yet.')}\n")
+        _write("\n")
+        return True
+
+    # --- Memory commands ---
+    if command in ("/memory", "/memories"):
+        memory = getattr(agent, "memory", None)
+        if memory and hasattr(memory, "scan_memory_files"):
+            files = memory.scan_memory_files()
+            if files:
+                _write(f"\n  {_c(_BOLD, 'Memory Files')}\n\n")
+                for f in files:
+                    name = f.get("filename", f.get("name", "unknown"))
+                    mtype = f.get("type", "")
+                    _write(f"  {_c(_CYAN, name)}")
+                    if mtype:
+                        _write(f"  {_c(_DIM, f'({mtype})')}")
+                    _write("\n")
+            else:
+                _write(f"\n  {_c(_DIM, 'No memory files.')}\n")
+            _write("\n")
+        else:
+            _write(f"\n  {_c(_DIM, 'Memory system not available.')}\n\n")
+        return True
+
+    if command == "/forget":
+        if not arg:
+            _write(f"\n  {_c(_DIM, 'Usage: /forget <filename>')}\n\n")
+            return True
+        memory = getattr(agent, "memory", None)
+        if memory and hasattr(memory, "memory_dir"):
+            target = memory.memory_dir / arg
+            if target.exists():
+                target.unlink()
+                _write(f"\n  {_c(_GREEN, f'Deleted: {arg}')}\n\n")
+            else:
+                _write(f"\n  {_c(_RED, f'File not found: {arg}')}\n\n")
+        else:
+            _write(f"\n  {_c(_DIM, 'Memory system not available.')}\n\n")
+        return True
+
+    # --- Mode commands ---
+    if command == "/auto":
+        agent.config.auto_mode = not agent.config.auto_mode
+        agent.permissions.auto_mode = agent.config.auto_mode
+        status = "ON" if agent.config.auto_mode else "OFF"
+        color = _GREEN if agent.config.auto_mode else _RED
+        _write(f"\n  Auto mode: {_c(color, status)}\n\n")
+        return True
+
+    if command == "/plan":
+        agent.config.plan_mode = True
+        agent.permissions.plan_mode = True
+        _write(f"\n  {_c(_YELLOW, 'Plan mode enabled.')} Agent must use todo_write to plan.\n")
+        _write(f"  {_c(_DIM, 'Use /approve when ready to execute.')}\n\n")
+        return True
+
+    if command == "/approve":
+        agent.config.plan_mode = False
+        agent.permissions.plan_mode = False
+        _write(f"\n  {_c(_GREEN, 'Plan approved.')} Agent can now execute tools.\n\n")
+        return True
+
+    if command == "/verify":
+        _write(f"\n  {_c(_CYAN, 'Spawning verification specialist...')}\n")
+        try:
+            result = asyncio.run(
+                agent.subagent_manager.spawn_fresh(
+                    "Review all recent code changes. Run all tests. Report any issues, "
+                    "bugs, or missing test coverage.",
+                    mode="verify",
+                    max_turns=15,
+                )
+            )
+            output = result.get("result", "No findings.")
+            _write(f"\n{render_markdown(output)}\n\n")
+        except Exception as e:
+            _write(f"\n  {_c(_RED, f'Verification failed: {e}')}\n\n")
+        return True
+
+    if command == "/mode":
+        auto = getattr(agent.config, "auto_mode", False)
+        plan = getattr(agent.config, "plan_mode", False)
+        if plan:
+            _write(f"\n  Mode: {_c(_YELLOW, 'plan')}\n\n")
+        elif auto:
+            _write(f"\n  Mode: {_c(_GREEN, 'auto')}\n\n")
+        else:
+            _write(f"\n  Mode: {_c(_DIM, 'default')}\n\n")
+        return True
+
+    if command == "/coordinator":
+        agent.config.plan_mode = False
+        if hasattr(agent.config, "coordinator_mode"):
+            agent.config.coordinator_mode = True
+        _write(f"\n  {_c(_CYAN, 'Coordinator mode enabled.')} Agent will orchestrate subagents.\n\n")
+        return True
+
+    # --- Utility commands ---
+    if command == "/doctor":
+        _write(f"\n  {_c(_BOLD, 'Health Check')}\n\n")
+        _write(f"  Provider: {agent.config.provider} ({agent.config.model or 'default'})\n")
+        _write(f"  Tools: {len(agent.tools.names())} registered\n")
+        memory = getattr(agent, "memory", None)
+        if memory and hasattr(memory, "scan_memory_files"):
+            _write(f"  Memory: {len(memory.scan_memory_files())} files\n")
+        else:
+            _write(f"  Memory: not available\n")
+        if agent.persistence:
+            _write(f"  Sessions: {len(agent.persistence.list_sessions())}\n")
+        else:
+            _write(f"  Sessions: disabled\n")
+        _write(f"  Working dir: {agent.config.working_directory}\n")
+        _write("\n")
+        return True
+
+    if command == "/version":
+        _write(f"\n  SaltAgent v{__version__}\n\n")
+        return True
+
+    if command == "/config":
+        config_parts = arg.split(None, 1) if arg else []
+        if len(config_parts) == 0:
+            _write(f"\n  {_c(_BOLD, 'Configuration')}\n\n")
+            for key in sorted(vars(agent.config)):
+                if key.startswith("_") or key == "api_key":
+                    continue
+                val = getattr(agent.config, key)
+                _write(f"  {_c(_CYAN, key)}: {val}\n")
+            _write("\n")
+        elif len(config_parts) == 1:
+            key = config_parts[0]
+            val = getattr(agent.config, key, None)
+            if val is not None:
+                _write(f"\n  {key} = {val}\n\n")
+            else:
+                _write(f"\n  {_c(_RED, f'Unknown config key: {key}')}\n\n")
+        else:
+            key, value = config_parts
+            if hasattr(agent.config, key) and not key.startswith("_") and key != "api_key":
+                old = getattr(agent.config, key)
+                if isinstance(old, bool):
+                    setattr(agent.config, key, value.lower() in ("true", "1", "yes"))
+                elif isinstance(old, int):
+                    setattr(agent.config, key, int(value))
+                else:
+                    setattr(agent.config, key, value)
+                _write(f"\n  {key} = {getattr(agent.config, key)}\n\n")
+            else:
+                _write(f"\n  {_c(_RED, f'Cannot set: {key}')}\n\n")
+        return True
+
+    if command == "/export":
+        msgs = getattr(agent, "_conversation_messages", [])
+        if not msgs:
+            _write(f"\n  {_c(_DIM, 'No conversation to export.')}\n\n")
+            return True
+        lines = []
+        lines.append("# SaltAgent Conversation Export\n")
+        for m in msgs:
+            role = m.get("role", "unknown")
+            content = m.get("content", "")
+            if isinstance(content, str):
+                lines.append(f"## {role.title()}\n\n{content}\n")
+            elif isinstance(content, list):
+                text_parts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
+                if text_parts:
+                    lines.append(f"## {role.title()}\n\n{''.join(text_parts)}\n")
+        export_text = "\n".join(lines)
+        export_path = Path(agent.config.working_directory) / "conversation_export.md"
+        export_path.write_text(export_text)
+        _write(f"\n  Exported to: {_c(_CYAN, str(export_path))}\n\n")
         return True
 
     if command == "/tools":
@@ -711,127 +1244,6 @@ def _handle_slash_command(
         else:
             _write(f"  {_c(_DIM, 'Skill system not available.')}\n")
         _write("\n")
-        return True
-
-    if command == "/cost":
-        _write("\n")
-        # Prefer real budget tracker data from the agent
-        _budget_shown = False
-        try:
-            budget = getattr(agent, "budget", None)
-            if budget and hasattr(budget, "total_tokens") and budget.total_tokens > 0:
-                info = budget.format()
-                stats = budget.get_stats()
-                _write(f"  {_c(_BOLD, 'Token Usage')}\n\n")
-                _write(f"  {_c(_DIM, info)}\n")
-                turn_count = stats["turns"]
-                _write(f"  {_c(_DIM, f'Turns: {turn_count}')}\n")
-                _budget_shown = True
-        except (TypeError, AttributeError):
-            pass
-        if not _budget_shown:
-            info = tracker.format()
-            if info:
-                _write(f"  {_c(_DIM, info)}\n")
-            else:
-                _write(f"  {_c(_DIM, 'No tokens used yet.')}\n")
-        _write("\n")
-        return True
-
-    if command == "/mode":
-        _write(f"\n  {_c(_DIM, 'Mode: default (modes not yet implemented)')}\n\n")
-        return True
-
-    if command == "/compact":
-        _write(f"\n  {_c(_DIM, 'Context compaction not yet implemented.')}\n\n")
-        return True
-
-    if command == "/history":
-        _write(f"\n  {_c(_DIM, 'History summary not yet implemented.')}\n\n")
-        return True
-
-    if command == "/auto":
-        agent.config.auto_mode = not agent.config.auto_mode
-        agent.permissions.auto_mode = agent.config.auto_mode
-        status = "ON" if agent.config.auto_mode else "OFF"
-        color = _GREEN if agent.config.auto_mode else _RED
-        _write(f"\n  Auto mode: {_c(color, status)}\n\n")
-        return True
-
-    if command == "/plan":
-        agent.config.plan_mode = True
-        agent.permissions.plan_mode = True
-        _write(f"\n  {_c(_YELLOW, 'Plan mode enabled.')} Agent must use todo_write to plan.\n")
-        _write(f"  {_c(_DIM, 'Use /approve when ready to execute.')}\n\n")
-        return True
-
-    if command == "/approve":
-        agent.config.plan_mode = False
-        agent.permissions.plan_mode = False
-        _write(f"\n  {_c(_GREEN, 'Plan approved.')} Agent can now execute tools.\n\n")
-        return True
-
-    if command == "/search":
-        parts_local = cmd.strip().split(None, 1)
-        query = parts_local[1] if len(parts_local) > 1 else ""
-        if not query:
-            _write(f"\n  {_c(_DIM, 'Usage: /search <query>')}\n\n")
-            return True
-        if agent.persistence:
-            results = agent.persistence.search_sessions(query)
-            if results:
-                _write(f"\n  {_c(_BOLD, f'Search results for \"{query}\"')}\n\n")
-                for r in results:
-                    ts = r.get("timestamp", "")[:19]
-                    sid = r["session_id"][:12]
-                    _write(f"  {_c(_CYAN, sid)} {_c(_DIM, ts)} [{r['type']}]\n")
-                    preview = r["preview"][:120]
-                    if len(r["preview"]) > 120:
-                        preview += "..."
-                    _write(f"    {_c(_DIM, preview)}\n")
-            else:
-                _write(f"\n  {_c(_DIM, f'No results for \"{query}\"')}\n")
-            _write("\n")
-        else:
-            _write(f"\n  {_c(_DIM, 'Session persistence not enabled.')}\n\n")
-        return True
-
-    if command == "/verify":
-        _write(f"\n  {_c(_CYAN, 'Spawning verification specialist...')}\n")
-        try:
-            result = asyncio.run(
-                agent.subagent_manager.spawn_fresh(
-                    "Review all recent code changes. Run all tests. Report any issues, "
-                    "bugs, or missing test coverage.",
-                    mode="verify",
-                    max_turns=15,
-                )
-            )
-            output = result.get("result", "No findings.")
-            _write(f"\n{render_markdown(output)}\n\n")
-        except Exception as e:
-            _write(f"\n  {_c(_RED, f'Verification failed: {e}')}\n\n")
-        return True
-
-    if command == "/tasks":
-        if hasattr(agent, "task_manager"):
-            tasks = agent.task_manager.list_tasks()
-            if not tasks:
-                _write(f"\n  {_c(_DIM, 'No background tasks.')}\n\n")
-            else:
-                _write(f"\n  {_c(_BOLD, 'Background Tasks')}\n\n")
-                for t in tasks:
-                    status_color = {
-                        "running": _CYAN,
-                        "completed": _GREEN,
-                        "failed": _RED,
-                        "stopped": _YELLOW,
-                        "pending": _DIM,
-                    }.get(t.status.value, _DIM)
-                    _write(f"  [{_c(_CYAN, t.id)}] {_c(status_color, t.status.value):20s}  {t.prompt[:60]}\n")
-                _write("\n")
-        else:
-            _write(f"\n  {_c(_DIM, 'Task system not available.')}\n\n")
         return True
 
     return False
@@ -1255,8 +1667,8 @@ async def _interactive(
         if line.startswith("/"):
             first_word = line.split()[0] if line.split() else line
             known_commands = set(_SLASH_COMMANDS.keys()) | {"/q", "/exit"}
-            # /search takes an argument, match by prefix
-            if first_word in known_commands or first_word == "/search":
+            # Some commands take arguments -- match by prefix
+            if first_word in known_commands:
                 result = _handle_slash_command(line, agent, tracker, verbose)
                 if result is None:
                     _write(f"{_c(_DIM, 'Goodbye!')}\n")
@@ -1390,6 +1802,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Disable MCP server auto-discovery from .mcp.json",
     )
     parser.add_argument(
+        "--coordinator",
+        action="store_true",
+        help="Coordinator mode: delegate only, no direct file writes or command execution",
+    )
+    parser.add_argument(
         "-v", "--version",
         action="version",
         version=f"salt-agent {__version__}",
@@ -1430,6 +1847,7 @@ def main(argv: list[str] | None = None) -> None:
         auto_mode=args.auto,
         fallback_model=args.fallback_model,
         enable_mcp=not args.no_mcp,
+        coordinator_mode=args.coordinator,
     )
 
     from salt_agent.agent import SaltAgent

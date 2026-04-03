@@ -565,8 +565,17 @@ class TestSlashCommands:
         agent.config.context_window = 200_000
         agent.config.max_tool_result_chars = 10_000
         agent.config.system_prompt = ""
+        agent.config.provider = "openai"
+        agent.config.model = "gpt-4o"
+        agent.config.auto_mode = False
+        agent.config.plan_mode = False
+        agent.config.working_directory = "/tmp"
         agent.tools = MagicMock()
         agent.tools.names.return_value = ["read", "write", "bash", "edit"]
+        agent._conversation_messages = []
+        agent.persistence = None
+        agent.memory = MagicMock()
+        agent.memory.scan_memory_files.return_value = [{"filename": "test.md", "type": "session"}]
         return agent
 
     def test_slash_help(self):
@@ -604,6 +613,189 @@ class TestSlashCommands:
     def test_slash_compact(self):
         result = _handle_slash_command("/compact", self._make_mock_agent(), TokenTracker(), False)
         assert result is True
+
+    # --- New slash command tests ---
+
+    def test_slash_sessions_no_persistence(self):
+        agent = self._make_mock_agent()
+        agent.persistence = None
+        result = _handle_slash_command("/sessions", agent, TokenTracker(), False)
+        assert result is True
+
+    def test_slash_sessions_with_persistence(self):
+        agent = self._make_mock_agent()
+        agent.persistence = MagicMock()
+        agent.persistence.list_sessions.return_value = [
+            {"session_id": "abc123def456", "modified": 1711800000.0, "size": 2048},
+        ]
+        result = _handle_slash_command("/sessions", agent, TokenTracker(), False)
+        assert result is True
+
+    def test_slash_resume_no_persistence(self):
+        agent = self._make_mock_agent()
+        agent.persistence = None
+        result = _handle_slash_command("/resume", agent, TokenTracker(), False)
+        assert result is True
+
+    def test_slash_history_with_messages(self):
+        agent = self._make_mock_agent()
+        agent._conversation_messages = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hi there"},
+        ]
+        result = _handle_slash_command("/history", agent, TokenTracker(), False)
+        assert result is True
+
+    @patch("salt_agent.cli.subprocess.run")
+    def test_slash_diff(self, mock_run):
+        mock_run.return_value = MagicMock(stdout="diff output here", returncode=0)
+        result = _handle_slash_command("/diff", self._make_mock_agent(), TokenTracker(), False)
+        assert result is True
+        mock_run.assert_called_once()
+
+    @patch("salt_agent.cli.subprocess.run")
+    def test_slash_status(self, mock_run):
+        mock_run.return_value = MagicMock(stdout=" M file.py\n", returncode=0)
+        result = _handle_slash_command("/status", self._make_mock_agent(), TokenTracker(), False)
+        assert result is True
+
+    @patch("salt_agent.cli.subprocess.run")
+    def test_slash_branch(self, mock_run):
+        mock_run.return_value = MagicMock(stdout="main\n", returncode=0)
+        result = _handle_slash_command("/branch", self._make_mock_agent(), TokenTracker(), False)
+        assert result is True
+
+    @patch("salt_agent.cli.subprocess.run")
+    def test_slash_log(self, mock_run):
+        mock_run.return_value = MagicMock(stdout="abc1234 Initial commit\n", returncode=0)
+        result = _handle_slash_command("/log", self._make_mock_agent(), TokenTracker(), False)
+        assert result is True
+
+    @patch("salt_agent.cli.subprocess.run")
+    def test_slash_log_with_count(self, mock_run):
+        mock_run.return_value = MagicMock(stdout="abc1234 commit\n", returncode=0)
+        result = _handle_slash_command("/log 10", self._make_mock_agent(), TokenTracker(), False)
+        assert result is True
+        # Verify -10 was passed
+        call_args = mock_run.call_args[0][0]
+        assert "-10" in call_args
+
+    @patch("salt_agent.cli.subprocess.run")
+    def test_slash_stash(self, mock_run):
+        mock_run.return_value = MagicMock(stdout="Saved working directory\n", stderr="", returncode=0)
+        result = _handle_slash_command("/stash", self._make_mock_agent(), TokenTracker(), False)
+        assert result is True
+
+    def test_slash_undo_no_history(self):
+        agent = self._make_mock_agent()
+        agent.file_history = None
+        result = _handle_slash_command("/undo", agent, TokenTracker(), False)
+        assert result is True
+
+    def test_slash_commit_no_skills(self):
+        agent = self._make_mock_agent()
+        del agent.skill_manager
+        result = _handle_slash_command("/commit", agent, TokenTracker(), False)
+        assert result is True
+
+    def test_slash_review_no_skills(self):
+        agent = self._make_mock_agent()
+        del agent.skill_manager
+        result = _handle_slash_command("/review", agent, TokenTracker(), False)
+        assert result is True
+
+    def test_slash_model_show(self):
+        agent = self._make_mock_agent()
+        agent.config.model = "gpt-4o"
+        result = _handle_slash_command("/model", agent, TokenTracker(), False)
+        assert result is True
+
+    def test_slash_model_change(self):
+        agent = self._make_mock_agent()
+        result = _handle_slash_command("/model gpt-4o-mini", agent, TokenTracker(), False)
+        assert result is True
+        assert agent.config.model == "gpt-4o-mini"
+
+    def test_slash_provider_show(self):
+        result = _handle_slash_command("/provider", self._make_mock_agent(), TokenTracker(), False)
+        assert result is True
+
+    def test_slash_provider_change(self):
+        agent = self._make_mock_agent()
+        result = _handle_slash_command("/provider anthropic", agent, TokenTracker(), False)
+        assert result is True
+        assert agent.config.provider == "anthropic"
+
+    def test_slash_tokens(self):
+        tracker = TokenTracker()
+        tracker.add(1000, 500)
+        result = _handle_slash_command("/tokens", self._make_mock_agent(), tracker, False)
+        assert result is True
+
+    def test_slash_budget_no_budget(self):
+        agent = self._make_mock_agent()
+        agent.budget = None
+        result = _handle_slash_command("/budget", agent, TokenTracker(), False)
+        assert result is True
+
+    def test_slash_memory(self):
+        result = _handle_slash_command("/memory", self._make_mock_agent(), TokenTracker(), False)
+        assert result is True
+
+    def test_slash_memories(self):
+        result = _handle_slash_command("/memories", self._make_mock_agent(), TokenTracker(), False)
+        assert result is True
+
+    def test_slash_forget_no_arg(self):
+        result = _handle_slash_command("/forget", self._make_mock_agent(), TokenTracker(), False)
+        assert result is True
+
+    def test_slash_coordinator(self):
+        result = _handle_slash_command("/coordinator", self._make_mock_agent(), TokenTracker(), False)
+        assert result is True
+
+    def test_slash_doctor(self):
+        agent = self._make_mock_agent()
+        old_stdout = sys.stdout
+        sys.stdout = StringIO()
+        try:
+            result = _handle_slash_command("/doctor", agent, TokenTracker(), False)
+            output = sys.stdout.getvalue()
+        finally:
+            sys.stdout = old_stdout
+        assert result is True
+        plain = strip_ansi(output)
+        assert "Provider" in plain
+        assert "Tools" in plain
+        assert "Memory" in plain
+        assert "Working dir" in plain
+
+    def test_slash_version(self):
+        old_stdout = sys.stdout
+        sys.stdout = StringIO()
+        try:
+            result = _handle_slash_command("/version", self._make_mock_agent(), TokenTracker(), False)
+            output = sys.stdout.getvalue()
+        finally:
+            sys.stdout = old_stdout
+        assert result is True
+        assert "SaltAgent" in strip_ansi(output)
+
+    def test_slash_config_show_all(self):
+        result = _handle_slash_command("/config", self._make_mock_agent(), TokenTracker(), False)
+        assert result is True
+
+    def test_slash_export_no_messages(self):
+        result = _handle_slash_command("/export", self._make_mock_agent(), TokenTracker(), False)
+        assert result is True
+
+    def test_slash_exit(self):
+        result = _handle_slash_command("/exit", self._make_mock_agent(), TokenTracker(), False)
+        assert result is None
+
+    def test_slash_q(self):
+        result = _handle_slash_command("/q", self._make_mock_agent(), TokenTracker(), False)
+        assert result is None
 
 
 # ---------------------------------------------------------------------------

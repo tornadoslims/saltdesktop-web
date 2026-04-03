@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import signal
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +18,49 @@ class SessionPersistence:
         self.sessions_dir = Path(sessions_dir or "~/.salt-agent/sessions").expanduser()
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         self._file = self.sessions_dir / f"{self.session_id}.jsonl"
+
+    # ------------------------------------------------------------------
+    # Concurrent session detection
+    # ------------------------------------------------------------------
+
+    def check_concurrent_session(self) -> dict | None:
+        """Check if another SaltAgent is using the same sessions directory.
+
+        Returns the lock data dict if a live session is detected, else None.
+        Also writes our own lock if no conflict.
+        """
+        lock_path = self.sessions_dir / ".lock"
+        if lock_path.exists():
+            try:
+                lock_data = json.loads(lock_path.read_text())
+                pid = lock_data.get("pid")
+                if pid is not None:
+                    try:
+                        os.kill(pid, 0)  # Check if process exists
+                        return lock_data  # Another session is running
+                    except OSError:
+                        pass  # Process is dead, stale lock
+            except (json.JSONDecodeError, KeyError, TypeError):
+                pass
+
+        # Write our lock
+        lock_path.write_text(json.dumps({
+            "pid": os.getpid(),
+            "started": datetime.now(timezone.utc).isoformat(),
+            "session_id": self.session_id,
+        }))
+        return None  # No conflict
+
+    def release_lock(self) -> None:
+        """Release the session lock."""
+        lock_path = self.sessions_dir / ".lock"
+        if lock_path.exists():
+            try:
+                lock_data = json.loads(lock_path.read_text())
+                if lock_data.get("pid") == os.getpid():
+                    lock_path.unlink()
+            except (json.JSONDecodeError, KeyError, TypeError, OSError):
+                pass
 
     def save_checkpoint(
         self,

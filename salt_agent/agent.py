@@ -11,7 +11,9 @@ from typing import AsyncIterator
 from salt_agent.attachments import AttachmentAssembler
 from salt_agent.compaction import (
     compact_context,
+    emergency_truncate,
     estimate_messages_tokens,
+    microcompact_tool_results,
     needs_compaction,
 )
 from salt_agent.config import AgentConfig
@@ -112,6 +114,11 @@ class SaltAgent:
 
         # Tools (after subagent_manager since AgentTool references it)
         self.tools = tools or self._default_tools()
+
+        # Coordinator mode: strip write/execute tools, keep delegation-only tools
+        if config.coordinator_mode:
+            from salt_agent.coordinator import apply_coordinator_mode
+            apply_coordinator_mode(self.tools)
 
         # Plugin system
         self.plugin_manager = None
@@ -263,6 +270,33 @@ class SaltAgent:
         # ToolSearch (deferred tool loading infrastructure)
         from salt_agent.tools.tool_search import ToolSearchTool
         registry.register(ToolSearchTool(registry))
+
+        # AskUser tool
+        from salt_agent.tools.ask_user import AskUserQuestionTool
+        registry.register(AskUserQuestionTool())
+
+        # Plan mode tools
+        from salt_agent.tools.plan_mode_tool import EnterPlanModeTool, ExitPlanModeTool
+        registry.register(EnterPlanModeTool(self.config))
+        registry.register(ExitPlanModeTool(self.config))
+
+        # Sleep tool
+        from salt_agent.tools.sleep_tool import SleepTool
+        registry.register(SleepTool(task_manager=self.task_manager))
+
+        # Config tool
+        from salt_agent.tools.config_tool import ConfigTool
+        registry.register(ConfigTool(agent_config=self.config))
+
+        # SendMessage tool
+        from salt_agent.tools.message_tool import SendMessageTool
+        registry.register(SendMessageTool(task_manager=self.task_manager))
+
+        # Worktree tools
+        from salt_agent.tools.worktree_tool import EnterWorktreeTool, ExitWorktreeTool
+        enter_wt = EnterWorktreeTool(agent_config=self.config)
+        registry.register(enter_wt)
+        registry.register(ExitWorktreeTool(enter_tool=enter_wt))
 
         return registry
 
@@ -450,6 +484,9 @@ class SaltAgent:
             # Context pressure check
             messages = self.context.manage_pressure(messages)
 
+            # Microcompaction: truncate old tool results before checking full compaction
+            messages = microcompact_tool_results(messages)
+
             # Check if compaction is needed
             if needs_compaction(messages, self.config):
                 old_tokens = estimate_messages_tokens(messages)
@@ -464,6 +501,14 @@ class SaltAgent:
                     files_read=files_read,
                 )
                 new_tokens = estimate_messages_tokens(messages)
+
+                # Emergency truncation if compaction wasn't enough
+                if new_tokens > int(self.config.context_window * 0.95):
+                    messages = emergency_truncate(
+                        messages, int(self.config.context_window * 0.7)
+                    )
+                    new_tokens = estimate_messages_tokens(messages)
+
                 self.hooks.fire("on_compaction", {
                     "old_tokens": old_tokens,
                     "new_tokens": new_tokens,

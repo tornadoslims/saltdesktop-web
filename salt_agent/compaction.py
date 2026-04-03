@@ -16,6 +16,62 @@ def estimate_tokens(text: str) -> int:
     return len(text) // 4
 
 
+# ---------------------------------------------------------------------------
+# Microcompaction -- truncate old tool results to save tokens
+# ---------------------------------------------------------------------------
+
+def microcompact_tool_results(
+    messages: list[dict],
+    max_result_chars: int = 5000,
+    recent_keep: int = 6,
+) -> list[dict]:
+    """Truncate old tool results to save tokens.
+
+    Recent tool results (last ``recent_keep`` messages) are kept in full.
+    Older results are truncated to keep the first and last portions.
+    """
+    cutoff = max(0, len(messages) - recent_keep)
+
+    for i in range(cutoff):
+        msg = messages[i]
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            for j, block in enumerate(content):
+                if isinstance(block, dict) and block.get("type") == "tool_result":
+                    result_text = block.get("content", "")
+                    if isinstance(result_text, str) and len(result_text) > max_result_chars:
+                        truncated = (
+                            result_text[:2000]
+                            + "\n\n[...truncated...]\n\n"
+                            + result_text[-1000:]
+                        )
+                        messages[i]["content"][j] = dict(block)
+                        messages[i]["content"][j]["content"] = truncated
+
+    return messages
+
+
+# ---------------------------------------------------------------------------
+# Emergency truncation -- last resort when compaction isn't enough
+# ---------------------------------------------------------------------------
+
+def emergency_truncate(messages: list[dict], target_tokens: int) -> list[dict]:
+    """Last resort: drop old messages until under target tokens.
+
+    Used when compaction fails or returns something too large.
+    Keeps system messages and the most recent messages.
+    """
+    while estimate_messages_tokens(messages) > target_tokens and len(messages) > 2:
+        # Remove the oldest non-system message
+        for i, msg in enumerate(messages):
+            if msg.get("role") != "system":
+                messages.pop(i)
+                break
+        else:
+            break  # only system messages left
+    return messages
+
+
 def estimate_messages_tokens(messages: list[dict]) -> int:
     """Estimate total tokens in a message list."""
     total = 0

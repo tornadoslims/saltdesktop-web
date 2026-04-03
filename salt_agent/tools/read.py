@@ -30,6 +30,8 @@ class ReadTool(Tool):
         self.files_read: set[str] = set()
         # Pending images for multimodal injection
         self._pending_images: list[dict] = []  # [{path, base64_data, media_type}]
+        # Track mtime at read time for external modification detection
+        self._read_mtimes: dict[str, float] = {}  # resolved_path -> mtime at read time
 
     def definition(self) -> ToolDefinition:
         return ToolDefinition(
@@ -58,9 +60,13 @@ class ReadTool(Tool):
                 "base64_data": b64,
                 "media_type": media_type,
             })
-            # Track as read
+            # Track as read (with mtime)
             resolved = str(path.resolve())
             self.files_read.add(resolved)
+            try:
+                self._read_mtimes[resolved] = path.stat().st_mtime
+            except OSError:
+                pass
             return f"[Image file: {file_path}, {size} bytes, base64 encoded]"
         except Exception as e:
             return f"Error reading image: {e}"
@@ -69,6 +75,10 @@ class ReadTool(Tool):
         """Read a PDF file, extracting text via pdftotext or raw read."""
         resolved = str(path.resolve())
         self.files_read.add(resolved)
+        try:
+            self._read_mtimes[resolved] = path.stat().st_mtime
+        except OSError:
+            pass
         # Try pdftotext first
         try:
             result = subprocess.run(
@@ -131,9 +141,13 @@ class ReadTool(Tool):
         if limit is not None and limit > 0:
             lines = lines[:limit]
 
-        # Track that this file has been read
+        # Track that this file has been read (with mtime for modification detection)
         resolved = str(path.resolve())
         self.files_read.add(resolved)
+        try:
+            self._read_mtimes[resolved] = path.stat().st_mtime
+        except OSError:
+            pass
 
         # Format with line numbers (1-based display)
         numbered = []
