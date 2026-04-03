@@ -728,8 +728,8 @@ class SaltAgent:
                 output_toks = self.provider.last_usage.get("output_tokens", 0)
                 self.budget.record_usage(input_toks, output_toks)
                 self.state.update(
-                    total_input_tokens=self.budget.total_input_tokens,
-                    total_output_tokens=self.budget.total_output_tokens,
+                    total_input_tokens=self.budget.total_input,
+                    total_output_tokens=self.budget.total_output,
                     total_cost=self.budget.total_cost_estimate,
                 )
 
