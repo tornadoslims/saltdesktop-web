@@ -38,6 +38,7 @@ __version__ = "0.1.0"
 # ---------------------------------------------------------------------------
 # ANSI escape codes
 # ---------------------------------------------------------------------------
+_BLUE = "\033[34m"
 _CYAN = "\033[36m"
 _GREEN = "\033[32m"
 _RED = "\033[31m"
@@ -75,6 +76,23 @@ _SPINNER_FRAMES = "\\u280b\\u2819\\u2839\\u2838\\u283c\\u2834\\u2826\\u2827\\u28
 _SPINNER = ["\u280b", "\u2819", "\u2839", "\u2838", "\u283c", "\u2834", "\u2826", "\u2827", "\u2807", "\u280f"]
 
 
+_HEARTBEAT_MESSAGES = [
+    "Thinking...",
+    "Still thinking...",
+    "Deep in thought...",
+    "Working on it...",
+]
+
+
+def _format_elapsed(seconds: float) -> str:
+    """Format elapsed seconds as (Xs) or (Xm Ys)."""
+    s = int(seconds)
+    if s < 60:
+        return f"({s}s)"
+    m, s = divmod(s, 60)
+    return f"({m}m {s}s)"
+
+
 class Spinner:
     """Animated thinking spinner that runs in a background thread."""
 
@@ -82,27 +100,61 @@ class Spinner:
         self._message = message
         self._running = False
         self._thread: threading.Thread | None = None
+        self._start_time: float = 0.0
+        self._last_event_time: float = 0.0
+        self._phase: str = "thinking"  # "thinking" or "tool"
 
     def start(self) -> None:
         if not _USE_COLOR:
             return
+        if self._thread and self._running:
+            return  # Already running
         self._running = True
+        now = time.monotonic()
+        if self._start_time == 0:
+            self._start_time = now
+        self._last_event_time = now
+        self._phase = "thinking"
         self._thread = threading.Thread(target=self._animate, daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
+        if not self._running and self._thread is None:
+            return  # Already stopped — don't write CLEAR_LINE again
         self._running = False
         if self._thread:
             self._thread.join(timeout=1)
             self._thread = None
-        if _USE_COLOR:
-            _write(_CLEAR_LINE)
+            # Only clear the spinner line on the FIRST stop
+            if _USE_COLOR:
+                _write(_CLEAR_LINE)
+
+    def note_event(self) -> None:
+        """Record that an event was received (resets heartbeat timer)."""
+        self._last_event_time = time.monotonic()
+
+    @property
+    def elapsed(self) -> float:
+        """Seconds since the spinner was started."""
+        if self._start_time == 0:
+            return 0.0
+        return time.monotonic() - self._start_time
+
+    def _pick_message(self) -> str:
+        """Pick a heartbeat message based on time since last event."""
+        if self._phase != "thinking":
+            return self._message
+        silence = time.monotonic() - self._last_event_time
+        idx = min(int(silence // 5), len(_HEARTBEAT_MESSAGES) - 1)
+        return _HEARTBEAT_MESSAGES[idx]
 
     def _animate(self) -> None:
         idx = 0
         while self._running:
             frame = _SPINNER[idx % len(_SPINNER)]
-            _write(f"{_CLEAR_LINE}  {_c(_DIM, f'{frame} {self._message}')}")
+            msg = self._pick_message()
+            elapsed_str = _format_elapsed(self.elapsed)
+            _write(f"{_CLEAR_LINE}  {_c(_DIM, f'{frame} {msg} {elapsed_str}')}")
             idx += 1
             time.sleep(0.08)
 
@@ -110,6 +162,31 @@ class Spinner:
 # ---------------------------------------------------------------------------
 # Markdown renderer (ANSI, no dependencies)
 # ---------------------------------------------------------------------------
+
+def _highlight_python(code: str) -> str:
+    """Basic Python syntax highlighting with ANSI."""
+    # Keywords
+    keywords = r'\b(def|class|import|from|return|if|elif|else|for|while|try|except|finally|with|as|in|not|and|or|is|True|False|None|async|await|yield|raise|pass|break|continue|lambda)\b'
+    code = re.sub(keywords, rf'{_BOLD}{_BLUE}\1{_RESET}', code)
+    # Strings (simple -- single and double quotes, not multiline)
+    code = re.sub(r'(\"[^\"]*\"|\'[^\']*\')', rf'{_GREEN}\1{_RESET}', code)
+    # Comments
+    code = re.sub(r'(#.*)$', rf'{_DIM}\1{_RESET}', code, flags=re.MULTILINE)
+    # Numbers
+    code = re.sub(r'\b(\d+\.?\d*)\b', rf'{_CYAN}\1{_RESET}', code)
+    # Decorators
+    code = re.sub(r'^(\s*@\w+)', rf'{_YELLOW}\1{_RESET}', code, flags=re.MULTILINE)
+    return code
+
+
+def _is_python_code(lang: str, code: str) -> bool:
+    """Detect if a code block is Python."""
+    if lang in ("python", "py", "python3"):
+        return True
+    if not lang and ("def " in code or "import " in code):
+        return True
+    return False
+
 
 def render_markdown(text: str) -> str:
     """Convert markdown to ANSI-formatted terminal text."""
@@ -119,6 +196,8 @@ def render_markdown(text: str) -> str:
     lines = text.split("\n")
     result: list[str] = []
     in_code_block = False
+    code_lang = ""
+    code_lines: list[str] = []
     i = 0
 
     while i < len(lines):
@@ -126,16 +205,30 @@ def render_markdown(text: str) -> str:
 
         # Code block toggle
         if line.strip().startswith("```"):
-            in_code_block = not in_code_block
-            if in_code_block:
+            if not in_code_block:
+                in_code_block = True
+                code_lang = line.strip()[3:].strip().lower()
+                code_lines = []
                 result.append("")  # blank line before code block
             else:
+                # Closing fence -- render collected code block
+                in_code_block = False
+                raw_code = "\n".join(code_lines)
+                if _is_python_code(code_lang, raw_code):
+                    highlighted = _highlight_python(raw_code)
+                    for hl in highlighted.split("\n"):
+                        result.append(f"  {_DIM}\u2502{_RESET} {hl}")
+                else:
+                    for cl in code_lines:
+                        result.append(f"  {_DIM}\u2502{_RESET} {_DIM}{cl}{_RESET}")
+                code_lang = ""
+                code_lines = []
                 result.append("")  # blank line after code block
             i += 1
             continue
 
         if in_code_block:
-            result.append(f"  {_DIM}\u2502{_RESET} {_DIM}{line}{_RESET}")
+            code_lines.append(line)
             i += 1
             continue
 
@@ -250,6 +343,42 @@ def _abbreviate_path(fp: str) -> str:
     return f".../{'/'.join(parts[-2:])}"
 
 
+def _extract_first_def(text: str) -> str:
+    """Extract the first function/class/import definition from text."""
+    for line in text.split("\n"):
+        stripped = line.strip()
+        for prefix in ("def ", "class ", "import ", "from "):
+            if stripped.startswith(prefix):
+                snippet = stripped[:60]
+                if len(stripped) > 60:
+                    snippet += "..."
+                return snippet
+    # Fallback: first non-empty line
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if stripped:
+            snippet = stripped[:60]
+            if len(stripped) > 60:
+                snippet += "..."
+            return snippet
+    return ""
+
+
+def _parse_pytest_output(text: str) -> str | None:
+    """Try to extract pytest summary from output."""
+    # Look for "X passed" pattern
+    m = re.search(r"(\d+) passed", text)
+    if m:
+        passed = m.group(1)
+        failed_m = re.search(r"(\d+) failed", text)
+        failed = failed_m.group(1) if failed_m else "0"
+        # Look for timing
+        time_m = re.search(r"in ([\d.]+)s", text)
+        time_str = f" ({time_m.group(1)}s)" if time_m else ""
+        return f"{passed} passed, {failed} failed{time_str}"
+    return None
+
+
 def _tool_result_brief(name: str, result: str, success: bool) -> str:
     """Return a brief one-line summary of a tool result."""
     if not success:
@@ -259,33 +388,95 @@ def _tool_result_brief(name: str, result: str, success: bool) -> str:
             first_line = first_line[:77] + "..."
         return first_line
 
-    result = result.strip()
-    if not result:
+    result_stripped = result.strip()
+    if not result_stripped:
         return "done"
 
     name_lower = name.lower()
+
+    if name_lower in ("list_files", "listfiles"):
+        file_list = [l for l in result_stripped.split("\n") if l.strip()]
+        return f"{len(file_list)} items"
+
     if name_lower == "edit":
-        return "applied edit"
+        # Try to extract occurrence count and old/new
+        occ_m = re.search(r"replaced (\d+) occurrence", result_stripped)
+        occ = occ_m.group(0) if occ_m else "applied edit"
+        # Try to find old→new from the result
+        old_m = re.search(r'"([^"]{1,25})".*?[→>].*?"([^"]{1,25})"', result_stripped)
+        if old_m:
+            return f'{occ} — "{old_m.group(1)}" → "{old_m.group(2)}"'
+        return occ
+
     if name_lower == "write":
-        lines = result.count("\n") + 1 if result else 0
-        return f"wrote file"
+        lines = result_stripped.count("\n") + 1 if result_stripped else 0
+        snippet = _extract_first_def(result_stripped)
+        preview = f" — {snippet}" if snippet else ""
+        if len(preview) > 45:
+            preview = preview[:42] + "..."
+        return f"wrote {lines} lines{preview}"
+
     if name_lower == "bash":
-        lines = result.split("\n")
+        # Check for pytest output first
+        pytest_summary = _parse_pytest_output(result_stripped)
+        if pytest_summary:
+            return pytest_summary
+        lines = result_stripped.split("\n")
         if len(lines) == 1 and len(lines[0]) < 80:
             return lines[0]
         return f"{len(lines)} lines of output"
+
     if name_lower == "read":
-        lines = result.count("\n") + 1
-        return f"{lines} lines"
+        lines = result_stripped.count("\n") + 1
+        snippet = _extract_first_def(result_stripped)
+        preview = f" — {snippet}" if snippet else ""
+        if len(preview) > 45:
+            preview = preview[:42] + "..."
+        return f"{lines} lines{preview}"
+
     if name_lower == "glob":
-        files = [l for l in result.split("\n") if l.strip()]
+        files = [l for l in result_stripped.split("\n") if l.strip()]
         return f"{len(files)} files"
+
     if name_lower == "grep":
-        matches = [l for l in result.split("\n") if l.strip()]
+        matches = [l for l in result_stripped.split("\n") if l.strip()]
         return f"{len(matches)} matches"
 
+    if name_lower == "web_search":
+        lines = [l for l in result_stripped.split("\n") if l.strip()]
+        count = len(lines)
+        first_title = lines[0][:40] + "..." if lines and len(lines[0]) > 40 else (lines[0] if lines else "")
+        return f'{count} results — "{first_title}"' if first_title else f"{count} results"
+
+    if name_lower == "web_fetch":
+        char_count = len(result_stripped)
+        # First sentence
+        first_sent = re.split(r'[.!?]\s', result_stripped, maxsplit=1)[0]
+        if len(first_sent) > 50:
+            first_sent = first_sent[:47] + "..."
+        if char_count < 1000:
+            return f"{char_count} chars — {first_sent}"
+        return f"{char_count // 1000}k chars — {first_sent}"
+
+    if name_lower == "todo_write":
+        # Try to count tasks
+        done = result_stripped.lower().count("done") + result_stripped.lower().count("completed")
+        progress = result_stripped.lower().count("in progress") + result_stripped.lower().count("in_progress")
+        pending = result_stripped.lower().count("pending")
+        total = done + progress + pending
+        if total > 0:
+            parts = []
+            if done:
+                parts.append(f"{done} done")
+            if progress:
+                parts.append(f"{progress} in progress")
+            if pending:
+                parts.append(f"{pending} pending")
+            return f"{total} tasks — {', '.join(parts)}"
+        return "updated tasks"
+
     # Generic: first line, truncated
-    first_line = result.split("\n")[0]
+    first_line = result_stripped.split("\n")[0]
     if len(first_line) > 60:
         first_line = first_line[:57] + "..."
     return first_line
@@ -347,7 +538,21 @@ class TokenTracker:
 # Startup banner
 # ---------------------------------------------------------------------------
 
-def _print_banner(config: AgentConfig, tool_names: list[str]) -> None:
+def _format_time_ago(seconds: float) -> str:
+    """Format seconds as a human-readable 'X ago' string."""
+    if seconds < 60:
+        return "just now"
+    minutes = int(seconds // 60)
+    if minutes < 60:
+        return f"{minutes}m ago"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours}h ago"
+    days = hours // 24
+    return f"{days}d ago"
+
+
+def _print_banner(config: AgentConfig, tool_names: list[str], session_info: dict | None = None) -> None:
     """Print the startup banner box."""
     home = os.path.expanduser("~")
     wd = os.path.abspath(config.working_directory)
@@ -365,6 +570,15 @@ def _print_banner(config: AgentConfig, tool_names: list[str]) -> None:
         (f"Provider: {provider_display}", None),
         (f"Directory: {display_dir}", None),
         (f"Tools: {tools_display}", None),
+    ]
+
+    # Session resume indicator
+    if session_info:
+        turns = session_info.get("turns", 0)
+        time_ago = session_info.get("time_ago", "")
+        content_lines.append((f"\u21bb Resuming session ({turns} turns, {time_ago})", None))
+
+    content_lines += [
         ("", 0),
         ("Type your request, or /help for commands.", None),
     ]
@@ -439,6 +653,7 @@ def _handle_slash_command(
         )
         if agent.config.system_prompt:
             agent.context.set_system(agent.config.system_prompt)
+        agent.clear_conversation()
         _write(f"\n  {_c(_DIM, 'Context cleared.')}\n\n")
         return True
 
@@ -479,6 +694,37 @@ def _handle_slash_command(
 # Event rendering
 # ---------------------------------------------------------------------------
 
+def _format_file_tree(file_list: list[str]) -> list[str]:
+    """Format a list of file paths as a tree with box-drawing characters."""
+    lines = []
+    for i, f in enumerate(file_list):
+        is_last = i == len(file_list) - 1
+        prefix = "\u2514\u2500\u2500 " if is_last else "\u251c\u2500\u2500 "
+        lines.append(f"      {prefix}{f}")
+    return lines
+
+
+def _edit_colored_summary(tool_input: dict, result: str) -> str | None:
+    """Return a colored old/new summary for edit tool results."""
+    result_stripped = result.strip()
+    occ_m = re.search(r"replaced (\d+) occurrence", result_stripped)
+    if not occ_m:
+        return None
+    count = occ_m.group(1)
+    old_str = tool_input.get("old_string", "")
+    new_str = tool_input.get("new_string", "")
+    if not old_str or not new_str:
+        return None
+    # Truncate for display
+    old_preview = old_str.split("\n")[0][:30]
+    new_preview = new_str.split("\n")[0][:30]
+    if len(old_str.split("\n")[0]) > 30:
+        old_preview += "..."
+    if len(new_str.split("\n")[0]) > 30:
+        new_preview += "..."
+    return f'{count} edit — {_RED}\u207b{old_preview}{_RESET} {_GREEN}\u207a{new_preview}{_RESET}'
+
+
 def _render_event(
     event,
     *,
@@ -486,8 +732,14 @@ def _render_event(
     spinner: Spinner | None = None,
     tracker: TokenTracker | None = None,
     text_started: list[bool] | None = None,
+    tool_count: list[int] | None = None,
+    last_tool_input: dict | None = None,
 ) -> None:
     """Render a single agent event to the terminal."""
+
+    # Notify spinner of activity (resets heartbeat timer)
+    if spinner:
+        spinner.note_event()
 
     if isinstance(event, TextChunk):
         if spinner:
@@ -503,6 +755,12 @@ def _render_event(
     elif isinstance(event, ToolStart):
         if spinner:
             spinner.stop()
+        if tool_count is not None:
+            tool_count[0] += 1
+        # Stash tool_input for use in ToolEnd
+        if last_tool_input is not None:
+            last_tool_input.clear()
+            last_tool_input.update({"_name": event.tool_name, **event.tool_input})
         brief = _tool_brief(event.tool_name, event.tool_input)
         _write(f"\n  {_c(_CYAN, f'\u26a1 {brief}')}\n")
         if verbose:
@@ -513,16 +771,37 @@ def _render_event(
                 _write(f"    {_c(_DIM, f'{k}: {val}')}\n")
 
     elif isinstance(event, ToolEnd):
-        summary = _tool_result_brief(event.tool_name, event.result, event.success)
-        if event.success:
+        name_lower = event.tool_name.lower()
+
+        # Colored edit summary
+        if name_lower in ("edit", "multi_edit") and event.success and last_tool_input:
+            colored = _edit_colored_summary(last_tool_input, event.result)
+            if colored:
+                _write(f"    {_c(_DIM, '\u2713')} {colored}\n")
+            else:
+                summary = _tool_result_brief(event.tool_name, event.result, event.success)
+                _write(f"    {_c(_DIM + _GREEN, f'\u2713 {summary}')}\n")
+        elif event.success:
+            summary = _tool_result_brief(event.tool_name, event.result, event.success)
             _write(f"    {_c(_DIM + _GREEN, f'\u2713 {summary}')}\n")
         else:
+            summary = _tool_result_brief(event.tool_name, event.result, event.success)
             _write(f"    {_c(_RED, f'\u2717 {summary}')}\n")
+
+        # Verbose: show file tree for list_files, or raw output for others
         if verbose and event.result.strip():
-            for line in event.result.strip().splitlines()[:10]:
-                _write(f"    {_c(_DIM, f'  {line}')}\n")
-            if len(event.result.strip().splitlines()) > 10:
-                _write(f"    {_c(_DIM, f'  ... ({len(event.result.strip().splitlines())} lines)')}\n")
+            if name_lower in ("list_files", "listfiles") and event.success:
+                file_list = [l for l in event.result.strip().split("\n") if l.strip()]
+                tree = _format_file_tree(file_list)
+                for tl in tree:
+                    _write(f"    {_c(_DIM, tl)}\n")
+            else:
+                for line in event.result.strip().splitlines()[:10]:
+                    _write(f"    {_c(_DIM, f'  {line}')}\n")
+                if len(event.result.strip().splitlines()) > 10:
+                    _write(f"    {_c(_DIM, f'  ... ({len(event.result.strip().splitlines())} lines)')}\n")
+        # Don't restart spinner — it erases streaming text
+        # The spinner only runs while waiting for the first response
 
     elif isinstance(event, AgentError):
         if spinner:
@@ -578,6 +857,41 @@ def _print_cost_line(tracker: TokenTracker) -> None:
     _write(f"{' ' * padding}{_c(_DIM, info)}\n")
 
 
+def _print_completion_summary(
+    elapsed: float,
+    tool_calls: int,
+    tracker: TokenTracker | None,
+) -> None:
+    """Print a single dim completion summary line, right-aligned."""
+    parts: list[str] = []
+
+    # Elapsed time
+    secs = int(elapsed)
+    if secs < 60:
+        parts.append(f"Completed in {secs}s")
+    else:
+        m, s = divmod(secs, 60)
+        parts.append(f"Completed in {m}m {s}s")
+
+    # Tool calls
+    if tool_calls > 0:
+        parts.append(f"{tool_calls} tool call{'s' if tool_calls != 1 else ''}")
+
+    # Tokens and cost
+    if tracker and tracker.total > 0:
+        if tracker.total < 1000:
+            parts.append(f"{tracker.total} tokens")
+        else:
+            parts.append(f"{tracker.total / 1000:.1f}k tokens")
+        cost = tracker.estimated_cost
+        parts.append(f"${cost:.3f}")
+
+    summary = " \u00b7 ".join(parts)
+    width = _term_width()
+    padding = max(width - len(summary) - 2, 0)
+    _write(f"{' ' * padding}{_c(_DIM, summary)}\n")
+
+
 # ---------------------------------------------------------------------------
 # Run agent (one-shot or single turn)
 # ---------------------------------------------------------------------------
@@ -598,6 +912,9 @@ async def _run_agent(
 
     spinner = Spinner("Thinking...") if show_spinner and _USE_COLOR else None
     text_started = [False]
+    tool_count = [0]
+    last_tool_input: dict = {}
+    run_start = time.monotonic()
 
     if spinner:
         spinner.start()
@@ -610,6 +927,8 @@ async def _run_agent(
                 spinner=spinner,
                 tracker=tracker,
                 text_started=text_started,
+                tool_count=tool_count,
+                last_tool_input=last_tool_input,
             )
     finally:
         if spinner:
@@ -619,9 +938,9 @@ async def _run_agent(
     if text_started[0]:
         _write("\n")
 
-    # Show cost
-    if tracker:
-        _print_cost_line(tracker)
+    # Show completion summary line
+    elapsed = time.monotonic() - run_start
+    _print_completion_summary(elapsed, tool_count[0], tracker)
 
 
 # ---------------------------------------------------------------------------
@@ -634,9 +953,36 @@ async def _interactive(
     verbose: bool = False,
     json_mode: bool = False,
 ) -> None:
+    # Check for persisted session
+    session_info = None
+    if agent.persistence:
+        try:
+            checkpoint = agent.persistence.load_last_checkpoint()
+            if checkpoint:
+                messages = checkpoint.get("messages", [])
+                turns = len([m for m in messages if m.get("role") == "user"])
+                ts = checkpoint.get("timestamp", "")
+                if ts:
+                    from datetime import datetime, timezone
+                    try:
+                        saved_at = datetime.fromisoformat(ts)
+                        now = datetime.now(timezone.utc)
+                        if saved_at.tzinfo is None:
+                            saved_at = saved_at.replace(tzinfo=timezone.utc)
+                        elapsed = (now - saved_at).total_seconds()
+                        time_ago = _format_time_ago(elapsed)
+                    except (ValueError, TypeError):
+                        time_ago = ""
+                else:
+                    time_ago = ""
+                if turns > 0:
+                    session_info = {"turns": turns, "time_ago": time_ago}
+        except Exception:
+            pass  # Don't let persistence errors break startup
+
     # Print banner
     tool_names = sorted(agent.tools.names())
-    _print_banner(agent.config, tool_names)
+    _print_banner(agent.config, tool_names, session_info=session_info)
 
     tracker = TokenTracker(model=agent.config.model)
 

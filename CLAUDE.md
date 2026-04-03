@@ -56,12 +56,28 @@ All product and technical specs live in `~/Projects/santiago-salt-desktop/claude
 
 **CRITICAL: Every decision must account for this becoming a fully contained macOS .app.** Salt Desktop will ship as a single macOS application bundle containing the Swift UI, JBCP API server, and all runtime components. All file paths, directory conventions, process management, and architecture decisions must work inside an app sandbox. No hardcoded paths -- use relative paths from a configurable base directory. No assumptions about system-level installs. Everything self-contained.
 
+## SaltAgent Implementation Rules
+
+**Always implement SaltAgent features the way Claude Code would have done it.** Reference `docs/CLAUDE_CODE_SOURCE_ANALYSIS.md` and `docs/CLAUDE_CODE_INTERNALS.md`. Don't guess or simplify — Claude Code's patterns are battle-tested across millions of users.
+
+Key patterns to always follow:
+- **The agent IS the conversation.** Messages live on the agent instance. `run()` adds turns, doesn't create new conversations. The QueryEngine model, not request/response.
+- **System prompt is reassembled every turn.** Memory, context, and attachments may change between turns.
+- **Compaction replaces old messages** with a summary inside the same conversation. Not a new conversation.
+- **Transcripts are JSONL, append-only, written BEFORE the API call.** Crash safety.
+- **Tools are typed platform entities** with hooks, permissions, and structured results.
+- **Edit uses string replacement, requires prior Read.** Non-negotiable.
+- **TodoWrite uses replace-all semantics.** Agent writes the ENTIRE list each time.
+- **Context pressure is multi-layered.** Not just truncation — budget, summarize, compact, restore.
+- **Subagents are cheap forks.** Fresh subagents get zero context. Forks share the prompt cache.
+- **Loop detection warns first, stops second.** Inject a "you're stuck" message before hard-stopping.
+
 ## Architecture
 
 The system is fully standalone with zero external dependencies on any agent platform.
 
 - **Planning chat:** Direct Anthropic/OpenAI SDK calls (streaming)
-- **Building:** Claude Code CLI (`claude --print --output-format json`)
+- **Building:** SaltAgent (our own agent execution engine at `salt_agent/`)
 - **Data storage:** SQLite (WAL mode, thread-safe)
 - **Credentials:** `~/.missionos/credentials/`
 - **Event streaming:** In-memory event bus -> SSE to frontend

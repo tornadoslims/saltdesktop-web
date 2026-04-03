@@ -85,6 +85,9 @@ class SaltAgent:
         # Tools (after subagent_manager since AgentTool references it)
         self.tools = tools or self._default_tools()
 
+        # Persistent conversation history for interactive mode
+        self._conversation_messages: list[dict] = []
+
         # Build system prompt: project instructions first, then user-supplied prompt
         self._assemble_system_prompt()
 
@@ -253,11 +256,24 @@ class SaltAgent:
         if system:
             agent.context.set_system(system)
 
+        # Restore conversation history so future run() calls continue it
+        agent._conversation_messages = list(messages)
+
         return agent, messages, system
 
     async def run(self, prompt: str) -> AsyncIterator[AgentEvent]:
-        """Run the agent loop, yielding events as they occur."""
-        messages: list[dict] = [{"role": "user", "content": prompt}]
+        """Run the agent loop, yielding events as they occur.
+
+        When conversation persistence is active (_conversation_messages is non-empty
+        or accumulating), messages from previous run() calls are preserved so the
+        agent maintains context across interactive turns.
+        """
+        # Append new user message to persistent conversation
+        self._conversation_messages.append({"role": "user", "content": prompt})
+
+        # Work with the full conversation history
+        messages = self._conversation_messages
+
         tools_used: list[str] = []
         _recent_tool_sigs: list[str] = []  # tool_name:input_hash for loop detection
         _consecutive_same_result: int = 0
@@ -351,6 +367,11 @@ class SaltAgent:
 
             # If no tool uses, we are done
             if not tool_uses:
+                # Save final assistant message to conversation history
+                if full_text:
+                    self._conversation_messages.append(
+                        {"role": "assistant", "content": full_text}
+                    )
                 self.hooks.fire("on_complete", {
                     "turns": turn + 1,
                     "tools_used": tools_used,
@@ -471,3 +492,10 @@ class SaltAgent:
             error=f"Max turns ({self.config.max_turns}) reached",
             recoverable=False,
         )
+
+    def clear_conversation(self) -> None:
+        """Clear persistent conversation history.
+
+        Call this to reset the agent's memory of previous turns (e.g., /clear).
+        """
+        self._conversation_messages.clear()

@@ -33,6 +33,12 @@ class WebSearchTool(Tool):
         query: str = kwargs["query"]
         max_results: int = kwargs.get("max_results", 5) or 5
 
+        # Append current year to bias toward recent results
+        import datetime
+        current_year = str(datetime.datetime.now().year)
+        if not any(str(y) in query for y in range(2024, 2030)):
+            query = f"{query} {current_year}"
+
         try:
             encoded = urllib.parse.quote_plus(query)
             url = f"https://html.duckduckgo.com/html/?q={encoded}"
