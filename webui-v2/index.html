@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Salt Desktop</title>
+  <link rel="stylesheet" href="/v2/static/style.css?v=12">
+</head>
+<body>
+  <div id="app">
+    <!-- Sidebar -->
+    <aside id="sidebar" class="sidebar">
+      <div class="sidebar-header">
+        <div class="app-logo">
+          <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
+            <circle cx="11" cy="11" r="9" stroke="#06b6d4" stroke-width="2"/>
+            <circle cx="11" cy="11" r="3.5" fill="#06b6d4"/>
+          </svg>
+          <span class="app-title">Salt Desktop</span>
+        </div>
+        <button id="btn-refresh" class="btn-icon" title="Refresh" onclick="State.loadAll().then(() => { Sidebar.render(); Router._onRoute(); })">↻</button>
+      </div>
+      <nav class="sidebar-nav sidebar-nav-top" id="sidebar-nav-top">
+        <a class="nav-item" data-route="dashboard">
+          <span class="nav-icon"><svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><rect x="1" y="1" width="6" height="6" rx="1" opacity=".85"/><rect x="9" y="1" width="6" height="6" rx="1" opacity=".55"/><rect x="1" y="9" width="6" height="6" rx="1" opacity=".55"/><rect x="9" y="9" width="6" height="6" rx="1" opacity=".35"/></svg></span>
+          <span class="nav-label">Dashboard</span>
+        </a>
+      </nav>
+      <div class="sidebar-divider"></div>
+      <div id="sidebar-companies" class="sidebar-companies"></div>
+      <div class="sidebar-divider"></div>
+      <nav class="sidebar-nav sidebar-nav-bottom" id="sidebar-nav-bottom">
+        <a class="nav-item" data-route="library">
+          <span class="nav-icon"><svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M2 2h3v12H2V2zm4.5 0H10v12H6.5V2zm5 0H15v12h-3.5V2z" opacity=".75"/></svg></span>
+          <span class="nav-label">Component Library</span>
+        </a>
+        <a class="nav-item" data-route="connectors">
+          <span class="nav-icon"><svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M4.5 2A2.5 2.5 0 002 4.5v1A2.5 2.5 0 004.5 8h1A2.5 2.5 0 008 5.5v-1A2.5 2.5 0 005.5 2h-1zm6 0A2.5 2.5 0 008 4.5v1A2.5 2.5 0 0010.5 8h1A2.5 2.5 0 0014 5.5v-1A2.5 2.5 0 0011.5 2h-1zM2 10.5A2.5 2.5 0 014.5 8h1A2.5 2.5 0 018 10.5v1A2.5 2.5 0 015.5 14h-1A2.5 2.5 0 012 11.5v-1zm6 0A2.5 2.5 0 0110.5 8h1A2.5 2.5 0 0114 10.5v1a2.5 2.5 0 01-2.5 2.5h-1A2.5 2.5 0 018 11.5v-1z" opacity=".75"/></svg></span>
+          <span class="nav-label">Connectors</span>
+        </a>
+        <a class="nav-item" data-route="settings">
+          <span class="nav-icon"><svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 10a2 2 0 100-4 2 2 0 000 4z"/><path d="M14.32 8.09l-1.12-.65a5.1 5.1 0 000-1.88l1.12-.65a.25.25 0 00.09-.34l-1-1.73a.25.25 0 00-.34-.09l-1.12.65A5.1 5.1 0 0010.32 2.4V1.25a.25.25 0 00-.25-.25h-2a.25.25 0 00-.25.25v1.15a5.1 5.1 0 00-1.63.95l-1.12-.65a.25.25 0 00-.34.09l-1 1.73a.25.25 0 00.09.34l1.12.65a5.1 5.1 0 000 1.88l-1.12.65a.25.25 0 00-.09.34l1 1.73a.25.25 0 00.34.09l1.12-.65c.49.4 1.04.72 1.63.95v1.15a.25.25 0 00.25.25h2a.25.25 0 00.25-.25v-1.15a5.1 5.1 0 001.63-.95l1.12.65a.25.25 0 00.34-.09l1-1.73a.25.25 0 00-.09-.34z" opacity=".6"/></svg></span>
+          <span class="nav-label">Settings</span>
+        </a>
+      </nav>
+    </aside>
+
+    <!-- Main content area -->
+    <main id="main-content" class="main-content">
+      <div id="view-container" class="view-container"></div>
+    </main>
+  </div>
+
+  <!-- Bottom status bar / ticker -->
+  <footer id="status-bar" class="status-bar">
+    <div class="ticker-wrapper">
+      <div class="ticker-track" id="ticker-track"></div>
+    </div>
+    <div class="status-right">
+      <span class="status-dot green"></span>
+      <span id="status-summary">Connected</span>
+    </div>
+  </footer>
+
+  <script src="/v2/static/app.js?v=12"></script>
+  <script src="/v2/views/dashboard.js?v=12"></script>
+  <script src="/v2/views/company.js?v=12"></script>
+  <script src="/v2/views/mission.js?v=12"></script>
+  <script src="/v2/views/library.js?v=12"></script>
+  <script src="/v2/views/connectors.js?v=12"></script>
+  <script src="/v2/views/settings.js?v=12"></script>
+  <script>
+    SaltApp.init();
+  </script>
+</body>
+</html>

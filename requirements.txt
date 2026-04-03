@@ -1,0 +1,7 @@
+packaging==26.0
+setuptools==82.0.1
+wheel==0.46.3
+fastapi==0.135.2
+uvicorn==0.42.0
+anthropic>=0.88.0
+openai>=1.30.0
