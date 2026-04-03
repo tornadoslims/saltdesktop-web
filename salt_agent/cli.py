@@ -690,6 +690,32 @@ _SLASH_COMMANDS = {
     "/skills": "List available skills",
     "/help": "Show available commands",
     "/quit": "Exit",
+    # Development
+    "/init": "Initialize SaltAgent in current directory",
+    "/scaffold": "Create basic project structure (README, tests/, src/)",
+    # Navigation
+    "/cd": "Change working directory: /cd <path>",
+    "/ls": "Quick directory listing: /ls [path]",
+    "/cat": "Quick file view: /cat <file>",
+    "/find": "Quick glob search: /find <pattern>",
+    # Git (additional)
+    "/pr": "Create a pull request via gh",
+    "/merge": "Merge current branch into main",
+    "/rebase": "Rebase current branch on main",
+    "/amend": "Amend last commit with staged changes",
+    # Agent control
+    "/stop": "Stop all background tasks",
+    "/retry": "Retry the last failed turn",
+    "/continue": "Continue from where the agent stopped",
+    "/redo": "Redo the last prompt",
+    # Information
+    "/context": "Show context window usage",
+    "/state": "Show full agent state",
+    "/debug": "Toggle verbose/debug mode",
+    "/env": "Show relevant environment variables",
+    # File management
+    "/recent": "Show recently modified files",
+    "/changed": "Show files changed in this session",
 }
 
 
@@ -838,7 +864,12 @@ def _handle_slash_command(
         categories = {
             "Session":  ["/sessions", "/resume", "/history", "/clear", "/search"],
             "Code":     ["/commit", "/review", "/diff", "/status", "/branch", "/log", "/stash", "/undo"],
+            "Git":      ["/pr", "/merge", "/rebase", "/amend"],
             "Agent":    ["/tasks", "/model", "/provider", "/tokens", "/budget", "/compact", "/cost"],
+            "Control":  ["/stop", "/retry", "/continue", "/redo"],
+            "Navigate": ["/cd", "/ls", "/cat", "/find"],
+            "Develop":  ["/init", "/scaffold"],
+            "Info":     ["/context", "/state", "/debug", "/env", "/recent", "/changed"],
             "Memory":   ["/memory", "/forget", "/memories"],
             "Mode":     ["/auto", "/plan", "/approve", "/verify", "/coordinator", "/mode"],
             "Utility":  ["/doctor", "/version", "/config", "/export", "/skills", "/tools", "/help", "/quit"],
@@ -1375,6 +1406,313 @@ def _handle_slash_command(
                 _write(f"  {_c(_DIM, 'No skills installed.')}\n")
         else:
             _write(f"  {_c(_DIM, 'Skill system not available.')}\n")
+        _write("\n")
+        return True
+
+    # --- Development commands ---
+    if command == "/init":
+        init_dir = Path(agent.config.working_directory) / ".salt-agent"
+        if init_dir.exists():
+            _write(f"\n  {_c(_DIM, 'Already initialized (.salt-agent/ exists).')}\n\n")
+        else:
+            init_dir.mkdir(parents=True)
+            (init_dir / "config.json").write_text("{}\n")
+            _write(f"\n  {_c(_GREEN, 'Initialized .salt-agent/ in current directory.')}\n\n")
+        return True
+
+    if command == "/scaffold":
+        wd = Path(agent.config.working_directory)
+        created: list[str] = []
+        for d in ["src", "tests"]:
+            p = wd / d
+            if not p.exists():
+                p.mkdir(parents=True)
+                (p / "__init__.py").write_text("")
+                created.append(d + "/")
+        readme = wd / "README.md"
+        if not readme.exists():
+            readme.write_text(f"# {wd.name}\n")
+            created.append("README.md")
+        if created:
+            _write(f"\n  {_c(_GREEN, 'Created:')} {', '.join(created)}\n\n")
+        else:
+            _write(f"\n  {_c(_DIM, 'Project structure already exists.')}\n\n")
+        return True
+
+    # --- Navigation commands ---
+    if command == "/cd":
+        if not arg:
+            _write(f"\n  {_c(_DIM, f'CWD: {agent.config.working_directory}')}\n\n")
+            return True
+        target = Path(arg).expanduser()
+        if not target.is_absolute():
+            target = Path(agent.config.working_directory) / target
+        target = target.resolve()
+        if target.is_dir():
+            agent.config.working_directory = str(target)
+            os.chdir(target)
+            _write(f"\n  {_c(_GREEN, str(target))}\n\n")
+        else:
+            _write(f"\n  {_c(_RED, f'Not a directory: {target}')}\n\n")
+        return True
+
+    if command == "/ls":
+        target = arg or agent.config.working_directory
+        result = subprocess.run(
+            ["ls", "-la", target],
+            capture_output=True, text=True,
+        )
+        output = result.stdout or result.stderr or "Empty."
+        _write(f"\n{output}\n")
+        return True
+
+    if command == "/cat":
+        if not arg:
+            _write(f"\n  {_c(_DIM, 'Usage: /cat <file>')}\n\n")
+            return True
+        target = Path(arg)
+        if not target.is_absolute():
+            target = Path(agent.config.working_directory) / target
+        try:
+            content = target.read_text()
+            _write(f"\n{content}\n")
+        except Exception as e:
+            _write(f"\n  {_c(_RED, str(e))}\n\n")
+        return True
+
+    if command == "/find":
+        if not arg:
+            _write(f"\n  {_c(_DIM, 'Usage: /find <pattern>')}\n\n")
+            return True
+        matches = sorted(_glob_module.glob(
+            os.path.join(agent.config.working_directory, "**", arg),
+            recursive=True,
+        ))[:30]
+        if matches:
+            wd = agent.config.working_directory
+            for m in matches:
+                rel = os.path.relpath(m, wd)
+                _write(f"  {_c(_CYAN, rel)}\n")
+        else:
+            _write(f"\n  {_c(_DIM, 'No matches.')}\n")
+        _write("\n")
+        return True
+
+    # --- Git additional commands ---
+    if command == "/pr":
+        wd = getattr(agent.config, "working_directory", ".")
+        _write(f"\n  {_c(_CYAN, 'Creating pull request...')}\n")
+        result = subprocess.run(
+            ["gh", "pr", "create", "--fill"],
+            cwd=wd, capture_output=True, text=True,
+        )
+        output = result.stdout.strip() or result.stderr.strip() or "Done."
+        _write(f"  {output}\n\n")
+        return True
+
+    if command == "/merge":
+        wd = getattr(agent.config, "working_directory", ".")
+        branch_result = subprocess.run(
+            ["git", "branch", "--show-current"], cwd=wd,
+            capture_output=True, text=True,
+        )
+        branch = branch_result.stdout.strip()
+        if branch in ("main", "master"):
+            _write(f"\n  {_c(_RED, 'Already on main branch.')}\n\n")
+        else:
+            result = subprocess.run(
+                ["git", "merge", "main"], cwd=wd,
+                capture_output=True, text=True,
+            )
+            output = result.stdout.strip() or result.stderr.strip() or "Done."
+            _write(f"\n  {output}\n\n")
+        return True
+
+    if command == "/rebase":
+        wd = getattr(agent.config, "working_directory", ".")
+        result = subprocess.run(
+            ["git", "rebase", "main"], cwd=wd,
+            capture_output=True, text=True,
+        )
+        output = result.stdout.strip() or result.stderr.strip() or "Done."
+        _write(f"\n  {output}\n\n")
+        return True
+
+    if command == "/amend":
+        wd = getattr(agent.config, "working_directory", ".")
+        result = subprocess.run(
+            ["git", "commit", "--amend", "--no-edit"], cwd=wd,
+            capture_output=True, text=True,
+        )
+        output = result.stdout.strip() or result.stderr.strip() or "Done."
+        _write(f"\n  {output}\n\n")
+        return True
+
+    # --- Agent control commands ---
+    if command == "/stop":
+        if hasattr(agent, "task_manager"):
+            stopped = 0
+            for t in agent.task_manager.list_tasks():
+                if t.status.value == "running":
+                    agent.task_manager.cancel_task(t.id)
+                    stopped += 1
+            _write(f"\n  {_c(_YELLOW, f'Stopped {stopped} task(s).')}\n\n")
+        else:
+            _write(f"\n  {_c(_DIM, 'No task manager available.')}\n\n")
+        return True
+
+    if command == "/retry":
+        msgs = getattr(agent, "_conversation_messages", [])
+        last_user = None
+        for m in reversed(msgs):
+            if m.get("role") == "user":
+                content = m.get("content", "")
+                if isinstance(content, str) and content.strip():
+                    last_user = content
+                    break
+        if last_user:
+            _write(f"\n  {_c(_CYAN, 'Retrying last prompt...')}\n")
+            asyncio.run(_run_agent(agent, last_user, tracker=tracker))
+        else:
+            _write(f"\n  {_c(_DIM, 'No previous prompt to retry.')}\n\n")
+        return True
+
+    if command == "/continue":
+        _write(f"\n  {_c(_CYAN, 'Continuing...')}\n")
+        asyncio.run(_run_agent(agent, "Continue from where you left off.", tracker=tracker))
+        return True
+
+    if command == "/redo":
+        msgs = getattr(agent, "_conversation_messages", [])
+        last_user = None
+        for m in reversed(msgs):
+            if m.get("role") == "user":
+                content = m.get("content", "")
+                if isinstance(content, str) and content.strip():
+                    last_user = content
+                    break
+        if last_user:
+            # Remove the last assistant+user exchange to truly redo
+            while msgs and msgs[-1].get("role") != "user":
+                msgs.pop()
+            if msgs:
+                msgs.pop()  # remove the user message itself
+            _write(f"\n  {_c(_CYAN, 'Redoing last prompt...')}\n")
+            asyncio.run(_run_agent(agent, last_user, tracker=tracker))
+        else:
+            _write(f"\n  {_c(_DIM, 'No previous prompt to redo.')}\n\n")
+        return True
+
+    # --- Information commands ---
+    if command == "/context":
+        msgs = getattr(agent, "_conversation_messages", [])
+        # Rough estimate: ~4 chars per token
+        total_chars = sum(
+            len(json.dumps(m.get("content", ""))) for m in msgs
+        )
+        est_tokens = total_chars // 4
+        window = getattr(agent.context, "context_window", 200_000)
+        pct = (est_tokens / window * 100) if window else 0
+        _write(f"\n  {_c(_BOLD, 'Context Window')}\n\n")
+        _write(f"  Messages:  {len(msgs)}\n")
+        _write(f"  Est. tokens: {est_tokens:,} / {window:,}\n")
+        bar_len = 30
+        filled = int(bar_len * pct / 100)
+        bar = "█" * filled + "░" * (bar_len - filled)
+        color = _GREEN if pct < 50 else (_YELLOW if pct < 80 else _RED)
+        _write(f"  Usage: {_c(color, f'{bar} {pct:.1f}%')}\n")
+        _write("\n")
+        return True
+
+    if command == "/state":
+        state = getattr(agent, "state", None)
+        if state and hasattr(state, "state"):
+            from dataclasses import asdict
+            d = asdict(state.state)
+            _write(f"\n  {_c(_BOLD, 'Agent State')}\n\n")
+            for k, v in sorted(d.items()):
+                if isinstance(v, list) and len(v) > 5:
+                    v = f"[{len(v)} items]"
+                _write(f"  {_c(_CYAN, k):30s}: {v}\n")
+            _write("\n")
+        else:
+            _write(f"\n  {_c(_DIM, 'State store not available.')}\n\n")
+        return True
+
+    if command == "/debug":
+        # Toggle verbose on the agent config
+        current = getattr(agent.config, "verbose", False)
+        agent.config.verbose = not current
+        status = "ON" if agent.config.verbose else "OFF"
+        color = _GREEN if agent.config.verbose else _RED
+        _write(f"\n  Debug mode: {_c(color, status)}\n\n")
+        return True
+
+    if command == "/env":
+        _write(f"\n  {_c(_BOLD, 'Environment')}\n\n")
+        env_keys = [
+            "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "SALT_AGENT_MODEL",
+            "SALT_AGENT_PROVIDER", "SALT_AGENT_HOME", "SHELL", "EDITOR",
+            "HOME", "PATH", "VIRTUAL_ENV", "NO_COLOR",
+        ]
+        for key in env_keys:
+            val = os.environ.get(key)
+            if val:
+                # Mask API keys
+                if "API_KEY" in key or "SECRET" in key:
+                    display = val[:8] + "..." + val[-4:] if len(val) > 16 else "***"
+                elif key == "PATH":
+                    display = val[:80] + "..." if len(val) > 80 else val
+                else:
+                    display = val
+                _write(f"  {_c(_CYAN, key):30s}: {display}\n")
+        _write("\n")
+        return True
+
+    # --- File management commands ---
+    if command == "/recent":
+        wd = agent.config.working_directory
+        result = subprocess.run(
+            ["find", wd, "-maxdepth", "3", "-type", "f",
+             "-not", "-path", "*/.git/*", "-not", "-path", "*/__pycache__/*",
+             "-not", "-path", "*/.venv/*", "-not", "-path", "*/node_modules/*"],
+            capture_output=True, text=True,
+        )
+        if result.stdout:
+            files = result.stdout.strip().split("\n")
+            # Sort by mtime
+            timed = []
+            for f in files:
+                try:
+                    timed.append((os.path.getmtime(f), f))
+                except OSError:
+                    pass
+            timed.sort(reverse=True)
+            _write(f"\n  {_c(_BOLD, 'Recently Modified')}\n\n")
+            for mtime, fpath in timed[:15]:
+                from datetime import datetime
+                ts = datetime.fromtimestamp(mtime).strftime("%H:%M:%S")
+                rel = os.path.relpath(fpath, wd)
+                _write(f"  {_c(_DIM, ts)}  {rel}\n")
+        else:
+            _write(f"\n  {_c(_DIM, 'No files found.')}\n")
+        _write("\n")
+        return True
+
+    if command == "/changed":
+        state = getattr(agent, "state", None)
+        written: list[str] = []
+        if state and hasattr(state, "state"):
+            written = list(state.state.files_written or [])
+        fh = getattr(agent, "file_history", None)
+        if fh and hasattr(fh, "tracked_files"):
+            written = list(set(written) | set(fh.tracked_files()))
+        if written:
+            _write(f"\n  {_c(_BOLD, 'Files Changed This Session')}\n\n")
+            for f in sorted(written):
+                _write(f"  {_c(_CYAN, f)}\n")
+        else:
+            _write(f"\n  {_c(_DIM, 'No files changed this session.')}\n")
         _write("\n")
         return True
 

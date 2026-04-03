@@ -431,7 +431,7 @@ class TestCreateAgent:
         from salt_agent import create_agent
         agent = create_agent(provider="anthropic")
         assert isinstance(agent, SaltAgent)
-        assert len(agent.tools.names()) == 31  # core + task + web + git + skill + tool_search + ask_user + plan_mode(2) + sleep + config + send_message + worktree(2)
+        assert len(agent.tools.names()) == 35  # core + task + web + git + skill + tool_search + ask_user + plan_mode(2) + sleep + config + send_message + worktree(2) + brief + python_repl + clipboard + open
 
     def test_create_with_custom_config(self):
         from salt_agent import create_agent

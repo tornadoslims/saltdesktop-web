@@ -45,6 +45,7 @@ from salt_agent.stop_hooks import StopHookRunner
 from salt_agent.subagent import SubagentManager
 from salt_agent.tasks.manager import TaskManager
 from salt_agent.token_budget import BudgetTracker
+from salt_agent.streaming_executor import StreamingToolExecutor, SAFE_STREAMING_TOOLS
 from salt_agent.tools.base import ToolRegistry
 
 # Tools that are safe to execute in parallel (no side effects, independent I/O)
@@ -301,6 +302,22 @@ class SaltAgent:
         enter_wt = EnterWorktreeTool(agent_config=self.config)
         registry.register(enter_wt)
         registry.register(ExitWorktreeTool(enter_tool=enter_wt))
+
+        # Brief tool (quick status messages)
+        from salt_agent.tools.brief import BriefTool
+        registry.register(BriefTool())
+
+        # Python REPL tool (persistent session)
+        from salt_agent.tools.repl import ReplTool
+        registry.register(ReplTool())
+
+        # Clipboard tool (read/write system clipboard)
+        from salt_agent.tools.clipboard import ClipboardTool
+        registry.register(ClipboardTool())
+
+        # Open tool (open files/URLs in default app)
+        from salt_agent.tools.open_tool import OpenTool
+        registry.register(OpenTool())
 
         return registry
 
@@ -636,9 +653,12 @@ class SaltAgent:
             self.budget.start_turn()
 
             # Call LLM (with prompt-too-long recovery)
+            # Streaming tool execution: safe tools start executing as their
+            # tool_use blocks are detected mid-stream, before the model finishes.
             tool_uses: list[ToolUse] = []
             full_text = ""
             _prompt_too_long = False
+            streaming_executor = StreamingToolExecutor(self.tools, self.hooks)
 
             try:
                 async for event in self.provider.stream_response(
@@ -670,6 +690,13 @@ class SaltAgent:
                         full_text += event.text
                     elif isinstance(event, ToolUse):
                         tool_uses.append(event)
+                        # Start executing safe tools immediately during streaming
+                        pending = streaming_executor.submit(event)
+                        if pending.started_during_stream:
+                            yield ToolStart(
+                                tool_name=event.tool_name,
+                                tool_input=event.tool_input,
+                            )
             except Exception as e:
                 error_str = str(e).lower()
                 if (
@@ -784,116 +811,21 @@ class SaltAgent:
                 })
             messages.append({"role": "assistant", "content": assistant_content})
 
-            # Execute tools -- async tools yield events, parallel when safe, sequential otherwise
+            # Execute tools using the streaming executor.
+            # Safe tools (read, glob, grep, etc.) already started during streaming.
+            # Unsafe tools (write, edit, bash, etc.) execute now sequentially.
             tool_results: list[dict] = []
 
-            # Check if any tool in this batch is async (e.g. agent tool)
+            # Check if any tool is async (e.g. agent tool) -- these need special handling
             has_async_tool = any(
                 (t := self.tools.get(tu.tool_name)) and t.is_async()
                 for tu in tool_uses
             )
 
-            # Async tools force sequential execution (they yield events)
-            parallel_safe = (
-                len(tool_uses) > 1
-                and not has_async_tool
-                and all(tu.tool_name in PARALLEL_SAFE_TOOLS for tu in tool_uses)
-            )
-
-            if parallel_safe:
-                # --- Parallel execution path ---
-                # Emit all ToolStart events up front
-                for tu in tool_uses:
-                    yield ToolStart(tool_name=tu.tool_name, tool_input=tu.tool_input)
-                    tools_used.append(tu.tool_name)
-
-                # Execute all tools concurrently
-                async def _run_one(tu: ToolUse) -> tuple[ToolUse, str, bool]:
-                    # Pre-tool hook
-                    hook_result = await self.hooks.fire_async("pre_tool_use", {
-                        "tool_name": tu.tool_name,
-                        "tool_input": tu.tool_input,
-                    })
-                    if hook_result.action == "block":
-                        return (tu, f"Tool blocked: {hook_result.reason}", False)
-
-                    tool = self.tools.get(tu.tool_name)
-                    if not tool:
-                        available = ", ".join(self.tools.names())
-                        return (tu, (
-                            f"Error: Tool '{tu.tool_name}' does not exist. "
-                            f"Available tools: {available}. "
-                            f"Do NOT try to simulate this tool with bash echo or other workarounds. "
-                            f"If you cannot accomplish the task with available tools, say so."
-                        ), False)
-
-                    try:
-                        loop = asyncio.get_event_loop()
-                        result = await loop.run_in_executor(
-                            None, lambda t=tu: tool.execute(**t.tool_input)
-                        )
-                        return (tu, result, True)
-                    except Exception as e:
-                        return (tu, f"Error: {str(e)}", False)
-
-                try:
-                    completed = await asyncio.gather(*[_run_one(tu) for tu in tool_uses])
-                except (KeyboardInterrupt, asyncio.CancelledError):
-                    # Cancel cleanup: add cancel results for all tool calls
-                    for tu in tool_uses:
-                        tool_results.append({
-                            "type": "tool_result",
-                            "tool_use_id": tu.tool_id,
-                            "content": "Tool call cancelled by user.",
-                        })
-                    if tool_results:
-                        self._conversation_messages.append({"role": "user", "content": tool_results})
-                    self.hooks.fire("turn_cancel", {"turn": turn})
-                    self.hooks.fire("session_end", {"turns": turn + 1, "cancelled": True})
-                    self.state.update(status="idle", current_tool="", current_tool_input={})
-                    yield AgentError(error="Cancelled by user.", recoverable=False)
-                    return
-
-                # Emit all ToolEnd events and build results
-                for tu, result, success in completed:
-                    yield ToolEnd(
-                        tool_name=tu.tool_name,
-                        result=result[:200],
-                        success=success,
-                    )
-                    self.hooks.fire("post_tool_use", {
-                        "tool_name": tu.tool_name,
-                        "result": result[:500],
-                        "success": success,
-                    })
-
-                    # Fire file hooks for write/edit tools
-                    if success:
-                        file_path = tu.tool_input.get("file_path", "")
-                        if tu.tool_name == "write" and file_path:
-                            self.hooks.fire("file_written", {"file_path": file_path})
-                        elif tu.tool_name in ("edit", "multi_edit") and file_path:
-                            self.hooks.fire("file_edited", {"file_path": file_path})
-
-                    result = self.context.truncate_tool_result(result)
-
-                    # Track for loop detection
-                    _sig = f"{tu.tool_name}:{_hl.md5(str(tu.tool_input).encode()).hexdigest()[:8]}"
-                    _recent_tool_sigs.append(_sig)
-                    _rh = _hl.md5(result.encode()).hexdigest()[:8]
-                    if _rh == _last_result_hash:
-                        _consecutive_same_result += 1
-                    else:
-                        _consecutive_same_result = 0
-                    _last_result_hash = _rh
-
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": tu.tool_id,
-                        "content": result,
-                    })
-            else:
-                # --- Sequential execution path (handles both sync and async tools) ---
+            if has_async_tool:
+                # --- Async tool path: sequential execution with event forwarding ---
+                # Async tools yield events (subagent spawned/complete) that must be
+                # forwarded to the caller. They cannot use the streaming executor.
                 try:
                     for tu in tool_uses:
                         # Fire pre_tool_use hook -- can block
@@ -933,13 +865,11 @@ class SaltAgent:
 
                         tool = self.tools.get(tu.tool_name)
                         if tool and tool.is_async():
-                            # --- Async tool path: yield events from the generator ---
                             result = ""
                             success = True
                             try:
                                 async for item in tool.async_execute(**tu.tool_input):
                                     if item["type"] == "event":
-                                        # Forward subagent/child events to the parent's stream
                                         yield item["event"]
                                     elif item["type"] == "result":
                                         result = item["content"]
@@ -959,7 +889,6 @@ class SaltAgent:
                             )
 
                         elif tool:
-                            # --- Sync tool path: existing behavior ---
                             try:
                                 result = tool.execute(**tu.tool_input)
                                 success = True
@@ -1032,7 +961,6 @@ class SaltAgent:
                             "content": result,
                         })
                 except (KeyboardInterrupt, asyncio.CancelledError):
-                    # Cancel cleanup: add cancel results for unprocessed tool calls
                     processed_ids = {r["tool_use_id"] for r in tool_results}
                     for tu in tool_uses:
                         if tu.tool_id not in processed_ids:
@@ -1048,6 +976,90 @@ class SaltAgent:
                     self.state.update(status="idle", current_tool="", current_tool_input={})
                     yield AgentError(error="Cancelled by user.", recoverable=False)
                     return
+            else:
+                # --- Streaming executor path ---
+                # Safe tools were already submitted during streaming. Now execute
+                # the remaining unsafe tools and collect all results in order.
+                try:
+                    await streaming_executor.execute_remaining()
+                    completed = await streaming_executor.collect_results()
+                except (KeyboardInterrupt, asyncio.CancelledError):
+                    for tu in tool_uses:
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": tu.tool_id,
+                            "content": "Tool call cancelled by user.",
+                        })
+                    if tool_results:
+                        self._conversation_messages.append({"role": "user", "content": tool_results})
+                    self.hooks.fire("turn_cancel", {"turn": turn})
+                    self.hooks.fire("session_end", {"turns": turn + 1, "cancelled": True})
+                    self.state.update(status="idle", current_tool="", current_tool_input={})
+                    yield AgentError(error="Cancelled by user.", recoverable=False)
+                    return
+
+                for pending in completed:
+                    tu = pending.tool_use
+                    result = pending.result
+                    success = pending.success
+
+                    # Emit ToolStart for tools that did NOT start during streaming
+                    if not pending.started_during_stream:
+                        yield ToolStart(tool_name=tu.tool_name, tool_input=tu.tool_input)
+                        self.state.update(
+                            status="executing_tool",
+                            current_tool=tu.tool_name,
+                            current_tool_input=tu.tool_input,
+                        )
+
+                    tools_used.append(tu.tool_name)
+
+                    yield ToolEnd(
+                        tool_name=tu.tool_name,
+                        result=result[:200],
+                        success=success,
+                    )
+
+                    # Fire post_tool_use hook
+                    self.hooks.fire("post_tool_use", {
+                        "tool_name": tu.tool_name,
+                        "result": result[:500],
+                        "success": success,
+                    })
+
+                    # Fire file hooks for write/edit tools
+                    if success:
+                        file_path = tu.tool_input.get("file_path", "")
+                        if tu.tool_name == "write" and file_path:
+                            self.hooks.fire("file_written", {"file_path": file_path})
+                            written = list(self.state.state.files_written)
+                            if file_path not in written:
+                                written.append(file_path)
+                                self.state.update(files_written=written)
+                        elif tu.tool_name in ("edit", "multi_edit") and file_path:
+                            self.hooks.fire("file_edited", {"file_path": file_path})
+                            written = list(self.state.state.files_written)
+                            if file_path not in written:
+                                written.append(file_path)
+                                self.state.update(files_written=written)
+
+                    result = self.context.truncate_tool_result(result)
+
+                    # Track for loop detection
+                    _sig = f"{tu.tool_name}:{_hl.md5(str(tu.tool_input).encode()).hexdigest()[:8]}"
+                    _recent_tool_sigs.append(_sig)
+                    _rh = _hl.md5(result.encode()).hexdigest()[:8]
+                    if _rh == _last_result_hash:
+                        _consecutive_same_result += 1
+                    else:
+                        _consecutive_same_result = 0
+                    _last_result_hash = _rh
+
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": tu.tool_id,
+                        "content": result,
+                    })
 
             # Inject pending images from ReadTool as multimodal content
             read_tool = self.tools.get("read")
