@@ -159,7 +159,7 @@ class TestSaltAgent:
         tool_ends = [e for e in events if isinstance(e, ToolEnd)]
         assert len(tool_ends) == 1
         assert tool_ends[0].success is False
-        assert "Unknown tool" in tool_ends[0].result
+        assert "does not exist" in tool_ends[0].result
 
     def test_tool_exception(self):
         """Tool raises exception -> error result sent back, agent continues."""
@@ -271,7 +271,7 @@ class TestCreateAgent:
         from salt_agent import create_agent
         agent = create_agent(provider="anthropic")
         assert isinstance(agent, SaltAgent)
-        assert len(agent.tools.names()) == 8  # read, write, edit, bash, glob, grep, list_files, todo_write
+        assert len(agent.tools.names()) == 10  # read, write, edit, multi_edit, bash, glob, grep, list_files, todo_write, agent
 
     def test_create_with_custom_config(self):
         from salt_agent import create_agent

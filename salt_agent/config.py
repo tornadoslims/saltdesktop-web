@@ -31,3 +31,5 @@ class AgentConfig:
     # Permissions
     permission_rules: list | None = None  # list[PermissionRule] or None for defaults
     permission_ask_callback: object = None  # Callable or None
+    # Web tools
+    include_web_tools: bool = True  # Include WebFetch and WebSearch tools by default

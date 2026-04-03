@@ -59,3 +59,23 @@ class ContextCompacted(AgentEvent):
     type: str = "compaction"
     old_tokens: int = 0
     new_tokens: int = 0
+
+
+@dataclass
+class SubagentSpawned(AgentEvent):
+    type: str = "subagent_spawned"
+    mode: str = ""
+    prompt: str = ""
+
+
+@dataclass
+class SubagentComplete(AgentEvent):
+    type: str = "subagent_complete"
+    mode: str = ""
+    result: str = ""
+
+
+@dataclass
+class FileSnapshotted(AgentEvent):
+    type: str = "file_snapshotted"
+    file_path: str = ""

@@ -9,15 +9,20 @@ from salt_agent.events import (
     AgentError,
     AgentEvent,
     ContextCompacted,
+    FileSnapshotted,
+    SubagentComplete,
+    SubagentSpawned,
     TextChunk,
     ToolEnd,
     ToolStart,
     ToolUse,
 )
+from salt_agent.file_history import FileHistory
 from salt_agent.hooks import HookEngine, HookResult
 from salt_agent.memory import MemorySystem
 from salt_agent.permissions import PermissionRule, PermissionSystem
 from salt_agent.persistence import SessionPersistence
+from salt_agent.subagent import SubagentManager
 from salt_agent.tools.base import Tool, ToolDefinition, ToolParam, ToolRegistry
 from salt_agent.tools.todo import TodoWriteTool
 
@@ -33,6 +38,11 @@ __all__ = [
     "AgentComplete",
     "AgentError",
     "ContextCompacted",
+    "FileSnapshotted",
+    "SubagentSpawned",
+    "SubagentComplete",
+    "FileHistory",
+    "SubagentManager",
     "Tool",
     "ToolDefinition",
     "ToolParam",

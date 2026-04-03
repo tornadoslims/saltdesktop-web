@@ -496,10 +496,10 @@ class TestAgentTodoIntegration:
         assert "todo_write" in agent.tools.names()
 
     def test_todo_count(self):
-        """Default tools now include 8 tools (7 original + todo_write)."""
+        """Default tools now include 10 tools (7 original + todo_write + multi_edit + agent)."""
         from salt_agent import create_agent
         agent = create_agent(provider="anthropic")
-        assert len(agent.tools.names()) == 8
+        assert len(agent.tools.names()) == 10
 
 
 class TestContextCompactedEvent:

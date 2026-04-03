@@ -17,16 +17,21 @@ from salt_agent.events import (
     AgentError,
     AgentEvent,
     ContextCompacted,
+    FileSnapshotted,
+    SubagentComplete,
+    SubagentSpawned,
     TextChunk,
     ToolEnd,
     ToolStart,
     ToolUse,
 )
+from salt_agent.file_history import FileHistory
 from salt_agent.hooks import HookEngine, HookResult
 from salt_agent.memory import MemorySystem
 from salt_agent.permissions import PermissionSystem
 from salt_agent.persistence import SessionPersistence
 from salt_agent.providers.base import ProviderAdapter
+from salt_agent.subagent import SubagentManager
 from salt_agent.tools.base import ToolRegistry
 
 
@@ -36,7 +41,6 @@ class SaltAgent:
     def __init__(self, config: AgentConfig, tools: ToolRegistry | None = None) -> None:
         self.config = config
         self.provider = self._create_provider()
-        self.tools = tools or self._default_tools()
         self.context = ContextManager(
             context_window=config.context_window,
             max_tool_result_chars=config.max_tool_result_chars,
@@ -65,6 +69,22 @@ class SaltAgent:
         # Register permission hook
         self._register_permission_hook()
 
+        # Subagent manager (before tools, since AgentTool needs it)
+        self.subagent_manager = SubagentManager(self)
+
+        # File history (rewind support)
+        session_id = ""
+        if self.persistence:
+            session_id = self.persistence.session_id
+        else:
+            import uuid
+            session_id = str(uuid.uuid4())
+        self.file_history = FileHistory(session_id=session_id)
+        self._register_file_history_hook()
+
+        # Tools (after subagent_manager since AgentTool references it)
+        self.tools = tools or self._default_tools()
+
         # Build system prompt: project instructions first, then user-supplied prompt
         self._assemble_system_prompt()
 
@@ -78,12 +98,41 @@ class SaltAgent:
         else:
             raise ValueError(f"Unknown provider: {self.config.provider}")
 
+    @staticmethod
+    def _detect_loop(recent_sigs: list[str]) -> bool:
+        """Detect repeating patterns in tool call signatures.
+
+        Checks for repeating subsequences of length 1-4 that repeat 3+ times.
+        Example: [A,B,A,B,A,B] → pattern [A,B] repeats 3x → True
+        """
+        if len(recent_sigs) < 6:
+            return False
+
+        # Check patterns of length 1 to 4
+        for pattern_len in range(1, 5):
+            if len(recent_sigs) < pattern_len * 3:
+                continue
+            # Get the last pattern_len * 3 signatures
+            window = recent_sigs[-(pattern_len * 3):]
+            pattern = window[:pattern_len]
+            repeats = True
+            for i in range(pattern_len, len(window)):
+                if window[i] != pattern[i % pattern_len]:
+                    repeats = False
+                    break
+            if repeats:
+                return True
+
+        return False
+
     def _default_tools(self) -> ToolRegistry:
+        from salt_agent.tools.agent_tool import AgentTool
         from salt_agent.tools.bash import BashTool
         from salt_agent.tools.edit import EditTool
         from salt_agent.tools.glob_tool import GlobTool
         from salt_agent.tools.grep import GrepTool
         from salt_agent.tools.list_files import ListFilesTool
+        from salt_agent.tools.multi_edit import MultiEditTool
         from salt_agent.tools.read import ReadTool
         from salt_agent.tools.todo import TodoWriteTool
         from salt_agent.tools.write import WriteTool
@@ -95,6 +144,7 @@ class SaltAgent:
         registry.register(read_tool)
         registry.register(WriteTool(read_tool=read_tool, working_directory=wd))
         registry.register(EditTool(read_tool=read_tool, working_directory=wd))
+        registry.register(MultiEditTool(read_tool=read_tool, working_directory=wd))
         registry.register(BashTool(
             timeout=self.config.bash_timeout,
             working_directory=wd,
@@ -103,6 +153,15 @@ class SaltAgent:
         registry.register(GrepTool(working_directory=wd))
         registry.register(ListFilesTool(working_directory=wd))
         registry.register(TodoWriteTool())
+        registry.register(AgentTool(self.subagent_manager))
+
+        # Optional web tools
+        if self.config.include_web_tools:
+            from salt_agent.tools.web_fetch import WebFetchTool
+            from salt_agent.tools.web_search import WebSearchTool
+
+            registry.register(WebFetchTool())
+            registry.register(WebSearchTool())
 
         return registry
 
@@ -142,6 +201,20 @@ class SaltAgent:
             return None
 
         self.hooks.on("pre_tool_use", permission_hook)
+
+    def _register_file_history_hook(self) -> None:
+        """Register a pre_tool_use hook to snapshot files before writes/edits."""
+
+        def snapshot_hook(data: dict) -> HookResult | None:
+            tool_name = data.get("tool_name", "")
+            tool_input = data.get("tool_input", {})
+            if tool_name in ("write", "edit", "multi_edit"):
+                file_path = tool_input.get("file_path", "")
+                if file_path:
+                    self.file_history.snapshot(file_path)
+            return None
+
+        self.hooks.on("pre_tool_use", snapshot_hook)
 
     def _build_system_prompt(self) -> str:
         """Build the system prompt with any dynamic injections (e.g., todo state)."""
@@ -186,8 +259,36 @@ class SaltAgent:
         """Run the agent loop, yielding events as they occur."""
         messages: list[dict] = [{"role": "user", "content": prompt}]
         tools_used: list[str] = []
+        _recent_tool_sigs: list[str] = []  # tool_name:input_hash for loop detection
+        _consecutive_same_result: int = 0
+        _last_result_hash: str = ""
 
         for turn in range(self.config.max_turns):
+            # --- Loop detection (inspired by Claude Code's stuck-in-a-loop handling) ---
+            if self._detect_loop(_recent_tool_sigs):
+                # Inject a "you're stuck" message instead of hard-stopping
+                # Give the model ONE chance to course-correct
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "IMPORTANT: You appear to be stuck in a repeating pattern of tool calls. "
+                        "Stop and reassess. If you cannot accomplish the task with your available tools, "
+                        "explain what you need and what's blocking you. Do NOT repeat the same approach."
+                    ),
+                })
+                _recent_tool_sigs.clear()
+                _consecutive_same_result = 0
+                # If this is the second time we've injected this warning, hard stop
+                if turn > 0 and any(
+                    isinstance(m.get("content"), str) and "stuck in a repeating pattern" in m.get("content", "")
+                    for m in messages[:-1]
+                ):
+                    yield AgentError(
+                        error="Agent stuck in a loop after two warnings. Stopping.",
+                        recoverable=False,
+                    )
+                    self.hooks.fire("on_error", {"error": "Loop detected — hard stop"})
+                    return
             # Context pressure check
             messages = self.context.manage_pressure(messages)
 
@@ -321,7 +422,13 @@ class SaltAgent:
                             success=False,
                         )
                 else:
-                    result = f"Unknown tool: {tu.tool_name}"
+                    available = ", ".join(self.tools.names())
+                    result = (
+                        f"Error: Tool '{tu.tool_name}' does not exist. "
+                        f"Available tools: {available}. "
+                        f"Do NOT try to simulate this tool with bash echo or other workarounds. "
+                        f"If you cannot accomplish the task with available tools, say so."
+                    )
                     success = False
                     yield ToolEnd(
                         tool_name=tu.tool_name,
@@ -337,6 +444,17 @@ class SaltAgent:
                 })
 
                 result = self.context.truncate_tool_result(result)
+
+                # Track for loop detection
+                import hashlib as _hl
+                _sig = f"{tu.tool_name}:{_hl.md5(str(tu.tool_input).encode()).hexdigest()[:8]}"
+                _recent_tool_sigs.append(_sig)
+                _rh = _hl.md5(result.encode()).hexdigest()[:8]
+                if _rh == _last_result_hash:
+                    _consecutive_same_result += 1
+                else:
+                    _consecutive_same_result = 0
+                _last_result_hash = _rh
 
                 tool_results.append({
                     "type": "tool_result",
