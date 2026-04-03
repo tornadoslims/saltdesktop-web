@@ -779,11 +779,30 @@ _SLASH_COMMANDS = {
     "/retry": "Retry the last failed turn",
     "/continue": "Continue from where the agent stopped",
     "/redo": "Redo the last prompt",
+    "/fix": "Fix the last error (re-run with fix instructions)",
+    # Quick actions
+    "/run": "Quick bash command: /run <cmd>",
+    "/test": "Run tests in the working directory",
+    "/format": "Format code in the working directory",
+    # Conversation management
+    "/summarize": "Summarize the current conversation",
+    "/save": "Save conversation to a file: /save <path>",
+    "/load": "Load conversation from a file: /load <path>",
+    # Tool management
+    "/tool": "Show detailed info about a tool: /tool <name>",
+    "/mcp": "List MCP servers and their tools/resources",
+    # Configuration
+    "/theme": "Toggle dark/light color intensity",
+    "/wrap": "Toggle word wrap",
+    "/width": "Set max output width: /width <n>",
     # Information
     "/context": "Show context window usage",
     "/state": "Show full agent state",
     "/debug": "Toggle verbose/debug mode",
     "/env": "Show relevant environment variables",
+    "/about": "Show about/credits",
+    "/changelog": "Show what's new",
+    "/stats": "Show session stats (turns, tokens, tools, time)",
     # File management
     "/recent": "Show recently modified files",
     "/changed": "Show files changed in this session",
@@ -933,17 +952,18 @@ def _handle_slash_command(
         _write("\n")
         _write(f"  {_c(_BOLD, 'Commands')}\n\n")
         categories = {
-            "Session":  ["/sessions", "/resume", "/history", "/clear", "/search"],
+            "Session":  ["/sessions", "/resume", "/history", "/clear", "/search", "/summarize", "/save", "/load"],
             "Code":     ["/commit", "/review", "/diff", "/status", "/branch", "/log", "/stash", "/undo"],
             "Git":      ["/pr", "/merge", "/rebase", "/amend"],
             "Agent":    ["/tasks", "/model", "/provider", "/tokens", "/budget", "/compact", "/cost"],
-            "Control":  ["/stop", "/retry", "/continue", "/redo"],
+            "Control":  ["/stop", "/retry", "/redo", "/continue", "/fix", "/run", "/test", "/format"],
             "Navigate": ["/cd", "/ls", "/cat", "/find"],
             "Develop":  ["/init", "/scaffold"],
-            "Info":     ["/context", "/state", "/debug", "/env", "/recent", "/changed"],
+            "Info":     ["/context", "/state", "/stats", "/debug", "/env", "/about", "/changelog", "/recent", "/changed"],
             "Memory":   ["/memory", "/forget", "/memories"],
             "Mode":     ["/auto", "/plan", "/approve", "/verify", "/coordinator", "/mode"],
-            "Utility":  ["/doctor", "/version", "/config", "/export", "/skills", "/tools", "/help", "/quit"],
+            "Config":   ["/theme", "/wrap", "/width"],
+            "Utility":  ["/doctor", "/version", "/config", "/export", "/skills", "/tools", "/tool", "/mcp", "/help", "/quit"],
         }
         for cat, cmds in categories.items():
             _write(f"  {_c(_BOLD, cat):12s} {_c(_DIM, ' '.join(cmds))}\n")
@@ -1690,7 +1710,312 @@ def _handle_slash_command(
             _write(f"\n  {_c(_DIM, 'No previous prompt to redo.')}\n\n")
         return True
 
+    if command == "/fix":
+        _write(f"\n  {_c(_CYAN, 'Fixing last error...')}\n")
+        asyncio.run(_run_agent(agent, "Fix the error in my last request. Look at the error output above and resolve the issue.", tracker=tracker))
+        return True
+
+    # --- Quick actions ---
+    if command == "/run":
+        if not arg:
+            _write(f"\n  {_c(_DIM, 'Usage: /run <command>')}\n\n")
+            return True
+        wd = getattr(agent.config, "working_directory", ".")
+        try:
+            result = subprocess.run(
+                arg, shell=True, cwd=wd,
+                capture_output=True, text=True, timeout=30,
+            )
+            output = result.stdout
+            if result.stderr:
+                output += result.stderr
+            if output.strip():
+                _write(f"\n{output}\n")
+            else:
+                _write(f"\n  {_c(_DIM, 'Done (no output).')}\n\n")
+            if result.returncode != 0:
+                _write(f"  {_c(_RED, f'Exit code: {result.returncode}')}\n\n")
+        except subprocess.TimeoutExpired:
+            _write(f"\n  {_c(_RED, 'Command timed out (30s limit).')}\n\n")
+        except Exception as e:
+            _write(f"\n  {_c(_RED, str(e))}\n\n")
+        return True
+
+    if command == "/test":
+        wd = getattr(agent.config, "working_directory", ".")
+        # Detect test runner
+        pkg_json = Path(wd) / "package.json"
+        if pkg_json.exists():
+            cmd = ["npm", "test"]
+        else:
+            cmd = [sys.executable, "-m", "pytest", "-q", "--tb=short"]
+        cmd_str = " ".join(cmd)
+        _write(f"\n  {_c(_CYAN, f'Running: {cmd_str}')}\n\n")
+        try:
+            result = subprocess.run(
+                cmd, cwd=wd, capture_output=True, text=True, timeout=120,
+            )
+            output = result.stdout
+            if result.stderr:
+                output += result.stderr
+            if output.strip():
+                _write(f"{output}\n")
+            if result.returncode != 0:
+                _write(f"  {_c(_RED, f'Tests failed (exit code {result.returncode})')}\n\n")
+        except subprocess.TimeoutExpired:
+            _write(f"\n  {_c(_RED, 'Tests timed out (120s limit).')}\n\n")
+        except Exception as e:
+            _write(f"\n  {_c(_RED, str(e))}\n\n")
+        return True
+
+    if command == "/format":
+        wd = getattr(agent.config, "working_directory", ".")
+        pkg_json = Path(wd) / "package.json"
+        if pkg_json.exists():
+            cmd = ["npx", "prettier", "--write", "."]
+        else:
+            cmd = [sys.executable, "-m", "black", "."]
+        cmd_str = " ".join(cmd)
+        _write(f"\n  {_c(_CYAN, f'Running: {cmd_str}')}\n\n")
+        try:
+            result = subprocess.run(
+                cmd, cwd=wd, capture_output=True, text=True, timeout=60,
+            )
+            output = result.stdout
+            if result.stderr:
+                output += result.stderr
+            if output.strip():
+                _write(f"{output}\n")
+        except subprocess.TimeoutExpired:
+            _write(f"\n  {_c(_RED, 'Formatter timed out (60s limit).')}\n\n")
+        except Exception as e:
+            _write(f"\n  {_c(_RED, str(e))}\n\n")
+        return True
+
+    # --- Conversation management ---
+    if command == "/summarize":
+        _write(f"\n  {_c(_CYAN, 'Summarizing conversation...')}\n")
+        asyncio.run(_run_agent(agent, "Summarize our conversation so far. List the key topics discussed, decisions made, and any outstanding items.", tracker=tracker))
+        return True
+
+    if command == "/save":
+        if not arg:
+            _write(f"\n  {_c(_DIM, 'Usage: /save <path>')}\n\n")
+            return True
+        msgs = getattr(agent, "_conversation_messages", [])
+        if not msgs:
+            _write(f"\n  {_c(_DIM, 'No conversation to save.')}\n\n")
+            return True
+        target = Path(arg).expanduser()
+        if not target.is_absolute():
+            target = Path(agent.config.working_directory) / target
+        try:
+            data = {"messages": msgs, "model": agent.config.model, "provider": agent.config.provider}
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps(data, indent=2))
+            _write(f"\n  {_c(_GREEN, f'Saved {len(msgs)} messages to {target}')}\n\n")
+        except Exception as e:
+            _write(f"\n  {_c(_RED, f'Save failed: {e}')}\n\n")
+        return True
+
+    if command == "/load":
+        if not arg:
+            _write(f"\n  {_c(_DIM, 'Usage: /load <path>')}\n\n")
+            return True
+        target = Path(arg).expanduser()
+        if not target.is_absolute():
+            target = Path(agent.config.working_directory) / target
+        try:
+            data = json.loads(target.read_text())
+            loaded_msgs = data.get("messages", data) if isinstance(data, dict) else data
+            if isinstance(loaded_msgs, list):
+                agent._conversation_messages = loaded_msgs
+                _write(f"\n  {_c(_GREEN, f'Loaded {len(loaded_msgs)} messages from {target}')}\n\n")
+            else:
+                _write(f"\n  {_c(_RED, 'Invalid conversation format.')}\n\n")
+        except Exception as e:
+            _write(f"\n  {_c(_RED, f'Load failed: {e}')}\n\n")
+        return True
+
+    # --- Tool management ---
+    if command == "/tool":
+        if not arg:
+            _write(f"\n  {_c(_DIM, 'Usage: /tool <name>')}\n\n")
+            return True
+        tool_name = arg.strip()
+        tool_names = agent.tools.names()
+        if tool_name not in tool_names:
+            # Fuzzy match
+            matches = [n for n in tool_names if tool_name.lower() in n.lower()]
+            if matches:
+                _write(f"\n  {_c(_DIM, f'Tool \"{tool_name}\" not found. Did you mean:')}\n")
+                for m in matches[:5]:
+                    _write(f"    {_c(_CYAN, m)}\n")
+                _write("\n")
+            else:
+                _write(f"\n  {_c(_RED, f'Tool \"{tool_name}\" not found.')}\n\n")
+            return True
+        # Get tool schema/description if available
+        tool_obj = None
+        if hasattr(agent.tools, "get"):
+            tool_obj = agent.tools.get(tool_name)
+        elif hasattr(agent.tools, "_tools"):
+            tool_obj = agent.tools._tools.get(tool_name)
+        _write(f"\n  {_c(_BOLD, tool_name)}\n\n")
+        if tool_obj:
+            desc = getattr(tool_obj, "description", None)
+            if desc:
+                # Show first 3 lines of description
+                desc_lines = desc.strip().split("\n")[:3]
+                for dl in desc_lines:
+                    _write(f"  {_c(_DIM, dl.strip())}\n")
+            schema = getattr(tool_obj, "input_schema", None) or getattr(tool_obj, "parameters", None)
+            if schema and isinstance(schema, dict):
+                props = schema.get("properties", {})
+                required = set(schema.get("required", []))
+                if props:
+                    _write(f"\n  {_c(_BOLD, 'Parameters:')}\n")
+                    for pname, pinfo in props.items():
+                        req_mark = "*" if pname in required else " "
+                        ptype = pinfo.get("type", "any")
+                        pdesc = pinfo.get("description", "")[:60]
+                        _write(f"  {req_mark} {_c(_CYAN, pname):20s} {_c(_DIM, ptype):10s} {_c(_DIM, pdesc)}\n")
+        else:
+            _write(f"  {_c(_DIM, 'No detailed info available.')}\n")
+        _write("\n")
+        return True
+
+    if command == "/mcp":
+        _write("\n")
+        mcp = getattr(agent, "mcp_manager", None)
+        if mcp and hasattr(mcp, "is_started") and mcp.is_started:
+            names = mcp.server_names if hasattr(mcp, "server_names") else []
+            if names:
+                _write(f"  {_c(_BOLD, 'MCP Servers')}\n\n")
+                for name in sorted(names):
+                    _write(f"  {_c(_CYAN, name)}\n")
+                    # Show tools from this server if available
+                    if hasattr(mcp, "get_server_tools"):
+                        try:
+                            tools = mcp.get_server_tools(name)
+                            for t in tools[:10]:
+                                tname = t.get("name", t) if isinstance(t, dict) else str(t)
+                                _write(f"    {_c(_DIM, f'- {tname}')}\n")
+                            if len(tools) > 10:
+                                _write(f"    {_c(_DIM, f'... and {len(tools) - 10} more')}\n")
+                        except Exception:
+                            pass
+            else:
+                _write(f"  {_c(_DIM, 'MCP started but no servers connected.')}\n")
+        else:
+            _write(f"  {_c(_DIM, 'MCP not started. Use --mcp or configure .mcp.json')}\n")
+        _write("\n")
+        return True
+
+    # --- Configuration ---
+    if command == "/theme":
+        # Toggle between normal and dim color intensity
+        global _USE_COLOR
+        if _USE_COLOR:
+            _USE_COLOR = False
+            _write(f"\n  Theme: {_c(_DIM, 'colors off')}\n\n")
+        else:
+            _USE_COLOR = True
+            _write(f"\n  Theme: colors on\n\n")
+        return True
+
+    if command == "/wrap":
+        current = getattr(agent.config, "word_wrap", True)
+        agent.config.word_wrap = not current
+        status = "ON" if agent.config.word_wrap else "OFF"
+        color = _GREEN if agent.config.word_wrap else _RED
+        _write(f"\n  Word wrap: {_c(color, status)}\n\n")
+        return True
+
+    if command == "/width":
+        if not arg or not arg.strip().isdigit():
+            current = getattr(agent.config, "max_output_width", _term_width())
+            _write(f"\n  Current width: {current} (terminal: {_term_width()})\n")
+            _write(f"  {_c(_DIM, 'Usage: /width <n>')}\n\n")
+            return True
+        new_width = int(arg.strip())
+        agent.config.max_output_width = new_width
+        _write(f"\n  Output width set to: {_c(_CYAN, str(new_width))}\n\n")
+        return True
+
     # --- Information commands ---
+    if command == "/about":
+        _write(f"\n  {_c(_BOLD, 'SaltAgent')} v{__version__}\n\n")
+        _write(f"  A general-purpose AI agent for the terminal.\n")
+        _write(f"  Built with Python, async streaming, and tool use.\n\n")
+        _write(f"  {_c(_DIM, 'Provider:')} {_capitalize_provider(agent.config.provider)}\n")
+        model = agent.config.model or _resolve_default_model(agent.config.provider)
+        _write(f"  {_c(_DIM, 'Model:')} {model}\n")
+        _write(f"  {_c(_DIM, 'Tools:')} {len(agent.tools.names())}\n")
+        _write(f"  {_c(_DIM, 'Directory:')} {agent.config.working_directory}\n")
+        _write(f"\n  {_c(_DIM, 'https://github.com/salt-agent/salt-agent')}\n\n")
+        return True
+
+    if command == "/changelog":
+        _write(f"\n  {_c(_BOLD, f'SaltAgent v{__version__} Changelog')}\n\n")
+        _write(f"  {_c(_CYAN, 'v0.1.0')}\n")
+        _write(f"  - Initial release\n")
+        _write(f"  - 75 slash commands\n")
+        _write(f"  - Interactive REPL with tab completion\n")
+        _write(f"  - Streaming tool use with colored output\n")
+        _write(f"  - Session persistence and resume\n")
+        _write(f"  - MCP server support\n")
+        _write(f"  - Background tasks and subagents\n")
+        _write(f"  - Memory system\n")
+        _write(f"  - Budget tracking\n")
+        _write(f"  - Diff previews for file edits\n")
+        _write("\n")
+        return True
+
+    if command == "/stats":
+        _write(f"\n  {_c(_BOLD, 'Session Stats')}\n\n")
+        # Turns
+        msgs = getattr(agent, "_conversation_messages", [])
+        user_turns = sum(1 for m in msgs if m.get("role") == "user")
+        assistant_turns = sum(1 for m in msgs if m.get("role") == "assistant")
+        _write(f"  Turns: {user_turns} user, {assistant_turns} assistant\n")
+        # Tool uses
+        tool_uses = 0
+        for m in msgs:
+            content = m.get("content", "")
+            if isinstance(content, list):
+                tool_uses += sum(1 for b in content if isinstance(b, dict) and b.get("type") == "tool_use")
+        _write(f"  Tool uses: {tool_uses}\n")
+        # Tokens
+        budget = getattr(agent, "budget", None)
+        if budget and hasattr(budget, "total_tokens") and budget.total_tokens > 0:
+            _write(f"  Tokens: {budget.total_tokens:,} (in: {budget.total_input:,}, out: {budget.total_output:,})\n")
+            if hasattr(budget, "estimated_cost"):
+                _write(f"  Est. cost: ${budget.estimated_cost:.4f}\n")
+        elif tracker.total > 0:
+            _write(f"  Tokens: {tracker.total:,} (in: {tracker.total_input:,}, out: {tracker.total_output:,})\n")
+            _write(f"  Est. cost: ${tracker.estimated_cost:.4f}\n")
+        else:
+            _write(f"  Tokens: 0\n")
+        # Session time
+        state = getattr(agent, "state", None)
+        if state and hasattr(state, "state") and hasattr(state.state, "started_at"):
+            started = state.state.started_at
+            if started:
+                try:
+                    from datetime import datetime, timezone
+                    start_dt = datetime.fromisoformat(started)
+                    if start_dt.tzinfo is None:
+                        start_dt = start_dt.replace(tzinfo=timezone.utc)
+                    elapsed = (datetime.now(timezone.utc) - start_dt).total_seconds()
+                    _write(f"  Session time: {_format_elapsed(elapsed).strip('()')}\n")
+                except (ValueError, TypeError):
+                    pass
+        # Model
+        model = agent.config.model or _resolve_default_model(agent.config.provider)
+        _write(f"  Model: {_capitalize_provider(agent.config.provider)}/{model}\n")
+        _write("\n")
+        return True
     if command == "/context":
         msgs = getattr(agent, "_conversation_messages", [])
         # Rough estimate: ~4 chars per token

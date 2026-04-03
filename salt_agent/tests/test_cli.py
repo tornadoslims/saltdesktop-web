@@ -743,3 +743,244 @@ class TestModelProviderCommands:
         tracker = TokenTracker()
         _handle_slash_command("/provider bad", agent, tracker, False)
         assert agent.config.provider == "openai"
+
+
+# ---------------------------------------------------------------------------
+# New slash commands (round 2)
+# ---------------------------------------------------------------------------
+
+class TestNewSlashCommands:
+    """Tests for the 15 newly added slash commands."""
+
+    def _make_mock_agent(self):
+        agent = MagicMock()
+        agent.config = MagicMock()
+        agent.config.model = "gpt-4o"
+        agent.config.provider = "openai"
+        agent.config.working_directory = "/tmp"
+        agent.config.auto_mode = False
+        agent.config.word_wrap = True
+        agent.config.max_output_width = 80
+        agent.tools = MagicMock()
+        agent.tools.names.return_value = ["read", "write", "bash", "edit", "glob", "grep"]
+        agent._conversation_messages = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hi there!"},
+        ]
+        return agent
+
+    # --- /fix ---
+    @patch("salt_agent.cli.asyncio")
+    def test_fix_command(self, mock_asyncio):
+        agent = self._make_mock_agent()
+        tracker = TokenTracker()
+        result = _handle_slash_command("/fix", agent, tracker, False)
+        assert result is True
+        mock_asyncio.run.assert_called_once()
+
+    # --- /run ---
+    @patch("salt_agent.cli.subprocess")
+    def test_run_command(self, mock_subprocess):
+        agent = self._make_mock_agent()
+        mock_subprocess.run.return_value = MagicMock(stdout="hello\n", stderr="", returncode=0)
+        tracker = TokenTracker()
+        result = _handle_slash_command("/run echo hello", agent, tracker, False)
+        assert result is True
+        mock_subprocess.run.assert_called_once()
+        call_args = mock_subprocess.run.call_args
+        assert call_args[0][0] == "echo hello"
+        assert call_args[1]["shell"] is True
+
+    def test_run_command_no_arg(self):
+        agent = self._make_mock_agent()
+        tracker = TokenTracker()
+        result = _handle_slash_command("/run", agent, tracker, False)
+        assert result is True  # Handled, shows usage
+
+    # --- /test ---
+    @patch("salt_agent.cli.subprocess")
+    def test_test_command(self, mock_subprocess):
+        agent = self._make_mock_agent()
+        mock_subprocess.run.return_value = MagicMock(stdout="3 passed\n", stderr="", returncode=0)
+        tracker = TokenTracker()
+        result = _handle_slash_command("/test", agent, tracker, False)
+        assert result is True
+
+    # --- /format ---
+    @patch("salt_agent.cli.subprocess")
+    def test_format_command(self, mock_subprocess):
+        agent = self._make_mock_agent()
+        mock_subprocess.run.return_value = MagicMock(stdout="reformatted\n", stderr="", returncode=0)
+        tracker = TokenTracker()
+        result = _handle_slash_command("/format", agent, tracker, False)
+        assert result is True
+
+    # --- /summarize ---
+    @patch("salt_agent.cli.asyncio")
+    def test_summarize_command(self, mock_asyncio):
+        agent = self._make_mock_agent()
+        tracker = TokenTracker()
+        result = _handle_slash_command("/summarize", agent, tracker, False)
+        assert result is True
+        mock_asyncio.run.assert_called_once()
+
+    # --- /save ---
+    def test_save_command(self, tmp_path):
+        agent = self._make_mock_agent()
+        agent.config.working_directory = str(tmp_path)
+        tracker = TokenTracker()
+        save_path = str(tmp_path / "conv.json")
+        result = _handle_slash_command(f"/save {save_path}", agent, tracker, False)
+        assert result is True
+        assert (tmp_path / "conv.json").exists()
+        data = json.loads((tmp_path / "conv.json").read_text())
+        assert "messages" in data
+        assert len(data["messages"]) == 2
+
+    def test_save_command_no_arg(self):
+        agent = self._make_mock_agent()
+        tracker = TokenTracker()
+        result = _handle_slash_command("/save", agent, tracker, False)
+        assert result is True  # Shows usage
+
+    def test_save_empty_conversation(self):
+        agent = self._make_mock_agent()
+        agent._conversation_messages = []
+        tracker = TokenTracker()
+        result = _handle_slash_command("/save /tmp/test.json", agent, tracker, False)
+        assert result is True
+
+    # --- /load ---
+    def test_load_command(self, tmp_path):
+        agent = self._make_mock_agent()
+        agent.config.working_directory = str(tmp_path)
+        save_file = tmp_path / "conv.json"
+        save_file.write_text(json.dumps({"messages": [
+            {"role": "user", "content": "test load"},
+        ]}))
+        tracker = TokenTracker()
+        result = _handle_slash_command(f"/load {save_file}", agent, tracker, False)
+        assert result is True
+        assert len(agent._conversation_messages) == 1
+        assert agent._conversation_messages[0]["content"] == "test load"
+
+    def test_load_command_no_arg(self):
+        agent = self._make_mock_agent()
+        tracker = TokenTracker()
+        result = _handle_slash_command("/load", agent, tracker, False)
+        assert result is True
+
+    def test_load_command_missing_file(self):
+        agent = self._make_mock_agent()
+        tracker = TokenTracker()
+        result = _handle_slash_command("/load /nonexistent/file.json", agent, tracker, False)
+        assert result is True
+
+    # --- /tool ---
+    def test_tool_command_found(self):
+        agent = self._make_mock_agent()
+        agent.tools.get.return_value = MagicMock(
+            description="Read files from disk",
+            input_schema={"properties": {"file_path": {"type": "string", "description": "Path to file"}}, "required": ["file_path"]},
+        )
+        tracker = TokenTracker()
+        result = _handle_slash_command("/tool read", agent, tracker, False)
+        assert result is True
+
+    def test_tool_command_not_found(self):
+        agent = self._make_mock_agent()
+        tracker = TokenTracker()
+        result = _handle_slash_command("/tool nonexistent", agent, tracker, False)
+        assert result is True  # Handled, shows error
+
+    def test_tool_command_no_arg(self):
+        agent = self._make_mock_agent()
+        tracker = TokenTracker()
+        result = _handle_slash_command("/tool", agent, tracker, False)
+        assert result is True
+
+    # --- /mcp ---
+    def test_mcp_command_not_started(self):
+        agent = self._make_mock_agent()
+        agent.mcp_manager = None
+        tracker = TokenTracker()
+        result = _handle_slash_command("/mcp", agent, tracker, False)
+        assert result is True
+
+    def test_mcp_command_started(self):
+        agent = self._make_mock_agent()
+        agent.mcp_manager = MagicMock()
+        agent.mcp_manager.is_started = True
+        agent.mcp_manager.server_names = ["puppeteer", "filesystem"]
+        tracker = TokenTracker()
+        result = _handle_slash_command("/mcp", agent, tracker, False)
+        assert result is True
+
+    # --- /theme ---
+    def test_theme_toggle(self):
+        import salt_agent.cli as cli_module
+        original = cli_module._USE_COLOR
+        agent = self._make_mock_agent()
+        tracker = TokenTracker()
+        result = _handle_slash_command("/theme", agent, tracker, False)
+        assert result is True
+        # Toggle back
+        _handle_slash_command("/theme", agent, tracker, False)
+        cli_module._USE_COLOR = original
+
+    # --- /wrap ---
+    def test_wrap_toggle(self):
+        agent = self._make_mock_agent()
+        agent.config.word_wrap = True
+        tracker = TokenTracker()
+        result = _handle_slash_command("/wrap", agent, tracker, False)
+        assert result is True
+        assert agent.config.word_wrap is False
+
+    # --- /width ---
+    def test_width_set(self):
+        agent = self._make_mock_agent()
+        tracker = TokenTracker()
+        result = _handle_slash_command("/width 120", agent, tracker, False)
+        assert result is True
+        assert agent.config.max_output_width == 120
+
+    def test_width_no_arg(self):
+        agent = self._make_mock_agent()
+        tracker = TokenTracker()
+        result = _handle_slash_command("/width", agent, tracker, False)
+        assert result is True  # Shows current width
+
+    # --- /about ---
+    def test_about_command(self):
+        agent = self._make_mock_agent()
+        tracker = TokenTracker()
+        result = _handle_slash_command("/about", agent, tracker, False)
+        assert result is True
+
+    # --- /changelog ---
+    def test_changelog_command(self):
+        agent = self._make_mock_agent()
+        tracker = TokenTracker()
+        result = _handle_slash_command("/changelog", agent, tracker, False)
+        assert result is True
+
+    # --- /stats ---
+    def test_stats_command(self):
+        agent = self._make_mock_agent()
+        agent.budget = None
+        tracker = TokenTracker()
+        tracker.add(1000, 500)
+        result = _handle_slash_command("/stats", agent, tracker, False)
+        assert result is True
+
+    def test_stats_with_budget(self):
+        agent = self._make_mock_agent()
+        agent.budget = MagicMock()
+        agent.budget.total_tokens = 5000
+        agent.budget.total_input = 3000
+        agent.budget.total_output = 2000
+        agent.budget.estimated_cost = 0.05
+        tracker = TokenTracker()
+        result = _handle_slash_command("/stats", agent, tracker, False)
+        assert result is True
