@@ -338,15 +338,19 @@ class TestGrepToolExtended:
     def test_basic_pattern_search(self, tmp_path):
         (tmp_path / "test.py").write_text("def hello():\n    pass\ndef world():\n    pass\n")
         tool = GrepTool(working_directory=str(tmp_path))
+        # Default mode is files_with_matches
         result = tool.execute(pattern="def", path=str(tmp_path))
-        assert "def hello" in result
-        assert "def world" in result
+        assert "test.py" in result
+        # Content mode shows matching lines
+        result_content = tool.execute(pattern="def", path=str(tmp_path), output_mode="content")
+        assert "def hello" in result_content
+        assert "def world" in result_content
 
     def test_regex_pattern(self, tmp_path):
         (tmp_path / "data.txt").write_text("foo123\nbar456\nbaz\n")
         tool = GrepTool(working_directory=str(tmp_path))
-        # Use basic regex (BRE compatible) since macOS grep doesn't support ERE by default
-        result = tool.execute(pattern="foo.*3", path=str(tmp_path))
+        # Use content mode to see matching lines
+        result = tool.execute(pattern="foo.*3", path=str(tmp_path), output_mode="content")
         assert "foo123" in result
 
     def test_no_matches(self, tmp_path):
@@ -358,15 +362,16 @@ class TestGrepToolExtended:
     def test_working_directory_default_path(self, tmp_path):
         (tmp_path / "wd.txt").write_text("findme_marker\n")
         tool = GrepTool(working_directory=str(tmp_path))
+        # Default mode returns file paths
         result = tool.execute(pattern="findme_marker")
-        assert "findme_marker" in result
+        assert "wd.txt" in result
 
     def test_case_insensitive(self, tmp_path):
         (tmp_path / "case.txt").write_text("Hello World\nhello world\nHELLO WORLD\n")
         tool = GrepTool(working_directory=str(tmp_path))
+        # files_with_matches mode returns the file path
         result = tool.execute(pattern="hello", path=str(tmp_path), case_insensitive=True)
-        # Should find all three lines
-        assert "Hello" in result or "hello" in result
+        assert "case.txt" in result
 
     def test_glob_filter(self, tmp_path):
         (tmp_path / "a.py").write_text("target_word\n")

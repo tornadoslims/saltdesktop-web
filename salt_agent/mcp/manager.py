@@ -28,6 +28,8 @@ class MCPServer:
         self.config = config
         self.session = None  # ClientSession once connected
         self.tools: list[Tool] = []
+        self.resources: list[dict] = []
+        self.prompts: list[dict] = []
         # Context managers we need to clean up
         self._transport_cm = None  # stdio_client context manager
         self._session_cm = None  # ClientSession context manager
@@ -124,6 +126,34 @@ class MCPManager:
             )
             server.tools.append(bridge)
 
+        # Discover resources (optional MCP capability)
+        try:
+            resources_response = await session.list_resources()
+            for resource in resources_response.resources:
+                server.resources.append({
+                    "uri": str(resource.uri),
+                    "name": resource.name,
+                    "description": getattr(resource, "description", "") or "",
+                    "mime_type": getattr(resource, "mimeType", "text/plain") or "text/plain",
+                })
+        except Exception:
+            pass  # Resources are optional
+
+        # Discover prompts (optional MCP capability)
+        try:
+            prompts_response = await session.list_prompts()
+            for prompt in prompts_response.prompts:
+                server.prompts.append({
+                    "name": prompt.name,
+                    "description": getattr(prompt, "description", "") or "",
+                    "arguments": [
+                        {"name": a.name, "required": getattr(a, "required", False)}
+                        for a in (getattr(prompt, "arguments", None) or [])
+                    ],
+                })
+        except Exception:
+            pass  # Prompts are optional
+
         self._servers[config.name] = server
         return server.tools
 
@@ -179,6 +209,26 @@ class MCPManager:
         for server in self._servers.values():
             tools.extend(server.tools)
         return tools
+
+    def get_all_resources(self) -> list[dict]:
+        """Get all resources from all running MCP servers."""
+        resources: list[dict] = []
+        for server in self._servers.values():
+            for r in server.resources:
+                r_copy = dict(r)
+                r_copy["server"] = server.config.name
+                resources.append(r_copy)
+        return resources
+
+    def get_all_prompts(self) -> list[dict]:
+        """Get all prompts from all running MCP servers."""
+        prompts: list[dict] = []
+        for server in self._servers.values():
+            for p in server.prompts:
+                p_copy = dict(p)
+                p_copy["server"] = server.config.name
+                prompts.append(p_copy)
+        return prompts
 
     @property
     def server_names(self) -> list[str]:

@@ -52,6 +52,94 @@ def microcompact_tool_results(
 
 
 # ---------------------------------------------------------------------------
+# History snip -- snip old assistant text responses at 60% capacity
+# ---------------------------------------------------------------------------
+
+
+def history_snip(messages: list[dict], context_window: int) -> list[dict]:
+    """Snip old assistant text to summaries. Fires at 60% context capacity."""
+    estimated = estimate_messages_tokens(messages)
+    threshold = int(context_window * 0.60)
+
+    if estimated < threshold:
+        return messages  # Not needed yet
+
+    # Only snip messages in the first half
+    midpoint = len(messages) // 2
+
+    for i in range(midpoint):
+        msg = messages[i]
+        if msg.get("role") != "assistant":
+            continue
+        content = msg.get("content", "")
+        if isinstance(content, str) and len(content) > 300:
+            messages[i] = dict(msg)
+            messages[i]["content"] = content[:200] + "\n\n[...snipped for context]"
+        elif isinstance(content, list):
+            # Snip text blocks, keep tool_use blocks
+            new_content = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text = block.get("text", "")
+                    if len(text) > 300:
+                        new_content.append({"type": "text", "text": text[:200] + "\n\n[...snipped]"})
+                    else:
+                        new_content.append(block)
+                else:
+                    new_content.append(block)  # keep tool_use blocks
+            messages[i] = dict(msg)
+            messages[i]["content"] = new_content
+
+    return messages
+
+
+# ---------------------------------------------------------------------------
+# Context collapse -- collapse old tool call pairs at 70% capacity
+# ---------------------------------------------------------------------------
+
+
+def context_collapse(messages: list[dict], context_window: int) -> list[dict]:
+    """Collapse old tool call pairs into summaries. Fires at 70%."""
+    estimated = estimate_messages_tokens(messages)
+    threshold = int(context_window * 0.70)
+
+    if estimated < threshold:
+        return messages
+
+    # Find tool call/result pairs in the first half and collapse them
+    midpoint = len(messages) // 2
+    collapsed: list[dict] = []
+    i = 0
+    while i < len(messages):
+        if i >= midpoint:
+            collapsed.append(messages[i])
+            i += 1
+            continue
+
+        msg = messages[i]
+        content = msg.get("content", "")
+
+        # Check if this is an assistant message with tool_use blocks
+        if msg.get("role") == "assistant" and isinstance(content, list):
+            tool_names = [
+                b.get("name", "")
+                for b in content
+                if isinstance(b, dict) and b.get("type") == "tool_use"
+            ]
+            if tool_names and i + 1 < len(messages):
+                # Next message should be tool results
+                summary = f"[Tool calls: {', '.join(tool_names)}]"
+                collapsed.append({"role": "assistant", "content": summary})
+                i += 2  # Skip both messages
+                continue
+
+        collapsed.append(msg)
+        i += 1
+
+    return collapsed
+
+
+# ---------------------------------------------------------------------------
 # Emergency truncation -- last resort when compaction isn't enough
 # ---------------------------------------------------------------------------
 

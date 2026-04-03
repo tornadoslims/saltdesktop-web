@@ -128,13 +128,56 @@ class HttpHook:
 
 # Event types
 HOOK_EVENTS = [
+    # Tool lifecycle
     "pre_tool_use",           # Before a tool executes. Can block.
     "post_tool_use",          # After a tool executes. Informational.
+
+    # API lifecycle
     "pre_api_call",           # Before an LLM API call. Can modify messages.
     "post_api_call",          # After an LLM response. Informational.
+
+    # Streaming
     "on_text_chunk",          # Text streaming chunk. Informational.
+
+    # Errors & completion
     "on_error",               # Error occurred. Informational.
     "on_complete",            # Agent finished. Informational.
+
+    # Context
     "on_compaction",          # Context was compacted. Informational.
+    "context_compacted",      # Alias for on_compaction.
+    "context_emergency",      # Emergency truncation happened.
+
+    # Permissions
     "on_permission_request",  # Permission needed. Can respond.
+
+    # Session lifecycle
+    "session_start",          # Agent session begins.
+    "session_end",            # Agent session ends.
+    "session_resume",         # Session resumed from checkpoint.
+
+    # Turn lifecycle
+    "turn_start",             # New turn begins.
+    "turn_end",               # Turn completes (with or without tools).
+    "turn_cancel",            # Turn cancelled by user.
+
+    # Memory
+    "memory_saved",           # Memory file was saved.
+    "memory_deleted",         # Memory file was deleted.
+    "memory_surfaced",        # Memories were surfaced for this turn.
+
+    # Subagent
+    "subagent_start",         # Subagent spawned.
+    "subagent_end",           # Subagent completed.
+
+    # Task
+    "task_created",           # Background task created.
+    "task_completed",         # Background task finished.
+    "task_failed",            # Background task failed.
+
+    # File
+    "file_written",           # File was written.
+    "file_edited",            # File was edited.
+    "file_deleted",           # File was deleted.
+    "file_snapshot",          # File was snapshotted for rewind.
 ]

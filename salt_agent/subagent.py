@@ -102,6 +102,13 @@ class SubagentManager:
         Returns a record dict with type, mode, prompt, result.
         This is the legacy API -- new code should use create_fresh() + run().
         """
+        if hasattr(self.parent, "hooks"):
+            self.parent.hooks.fire("subagent_start", {
+                "type": "fresh",
+                "mode": mode,
+                "prompt": prompt[:200],
+            })
+
         child = self.create_fresh(mode=mode, max_turns=max_turns)
         result_text = await _run_agent(child, prompt)
 
@@ -112,6 +119,14 @@ class SubagentManager:
             "result": result_text[:2000],
         }
         self.children.append(child_record)
+
+        if hasattr(self.parent, "hooks"):
+            self.parent.hooks.fire("subagent_end", {
+                "type": "fresh",
+                "mode": mode,
+                "result_length": len(result_text),
+            })
+
         return child_record
 
     async def fork(
@@ -125,6 +140,13 @@ class SubagentManager:
         Returns a record dict with type, mode, prompt, result.
         This is the legacy API -- new code should use create_fork() + run().
         """
+        if hasattr(self.parent, "hooks"):
+            self.parent.hooks.fire("subagent_start", {
+                "type": "fork",
+                "mode": "fork",
+                "prompt": prompt[:200],
+            })
+
         child = self.create_fork(max_turns=max_turns)
         # Override messages if explicitly provided
         if messages is not None:
@@ -139,6 +161,14 @@ class SubagentManager:
             "result": result_text[:2000],
         }
         self.children.append(child_record)
+
+        if hasattr(self.parent, "hooks"):
+            self.parent.hooks.fire("subagent_end", {
+                "type": "fork",
+                "mode": "fork",
+                "result_length": len(result_text),
+            })
+
         return child_record
 
 

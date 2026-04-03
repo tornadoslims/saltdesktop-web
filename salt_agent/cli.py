@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import atexit
+import glob as _glob_module
 import json
 import os
 import re
@@ -23,6 +25,11 @@ import sys
 import threading
 import time
 from pathlib import Path
+
+try:
+    import readline as _readline
+except ImportError:
+    _readline = None  # type: ignore[assignment]
 
 from salt_agent.config import AgentConfig
 from salt_agent.events import (
@@ -303,32 +310,56 @@ def _resolve_api_key(provider: str, explicit_key: str = "") -> str:
 # ---------------------------------------------------------------------------
 
 def _tool_brief(name: str, tool_input: dict) -> str:
-    """Return a short human-readable description of a tool call."""
+    """Return a short human-readable description of a tool call (Claude Code style)."""
     name_lower = name.lower()
     if name_lower == "bash":
         cmd = tool_input.get("command", "")
         if len(cmd) > 60:
             cmd = cmd[:57] + "..."
-        return f"bash {cmd}"
+        return f"Bash {cmd}"
     if name_lower == "write":
         fp = tool_input.get("file_path", "")
-        return f"write {_abbreviate_path(fp)}" if fp else "write"
+        return f"Write {Path(fp).name}" if fp else "Write"
     if name_lower == "edit":
         fp = tool_input.get("file_path", "")
-        return f"edit {_abbreviate_path(fp)}" if fp else "edit"
+        return f"Edit {Path(fp).name}" if fp else "Edit"
     if name_lower == "read":
         fp = tool_input.get("file_path", "")
-        return f"read {_abbreviate_path(fp)}" if fp else "read"
+        return f"Read {Path(fp).name}" if fp else "Read"
     if name_lower == "glob":
         pat = tool_input.get("pattern", "")
-        return f"glob {pat}"
+        return f"Glob {pat}"
     if name_lower == "grep":
         pat = tool_input.get("pattern", "")
-        return f"grep {pat}"
+        if len(pat) > 40:
+            pat = pat[:37] + "..."
+        return f"Grep {pat}"
+    if name_lower == "web_search":
+        query = tool_input.get("query", "")
+        if len(query) > 40:
+            query = query[:37] + "..."
+        return f"Search \"{query}\""
+    if name_lower == "web_fetch":
+        url = tool_input.get("url", "")
+        try:
+            from urllib.parse import urlparse
+            domain = urlparse(url).netloc
+            return f"Fetch {domain}"
+        except Exception:
+            return f"Fetch {url[:40]}"
+    if name_lower == "todo_write":
+        return "Update tasks"
+    if name_lower == "agent":
+        mode = tool_input.get("mode", "general")
+        return f"Spawn {mode} agent"
     if name_lower in ("list_files", "listfiles"):
         p = tool_input.get("path", ".")
-        return f"ls {p}"
-    return name
+        return f"List {p}"
+    if name_lower.startswith("task_"):
+        action = name_lower.replace("task_", "")
+        return f"Task {action}"
+    # Default: capitalize and clean up underscores
+    return name.replace("_", " ").title()
 
 
 def _abbreviate_path(fp: str) -> str:
@@ -386,109 +417,81 @@ def _parse_pytest_output(text: str) -> str | None:
 
 
 def _tool_result_brief(name: str, result: str, success: bool) -> str:
-    """Return a brief one-line summary of a tool result."""
+    """Return a brief one-line summary of a tool result (Claude Code style)."""
     if not success:
-        # Trim error to one line
-        first_line = result.strip().split("\n")[0]
-        if len(first_line) > 80:
+        # Show just the first line of the error
+        first_line = result.strip().split("\n")[0][:80]
+        if len(result.strip().split("\n")[0]) > 80:
             first_line = first_line[:77] + "..."
         return first_line
 
     result_stripped = result.strip()
     if not result_stripped:
-        return "done"
+        return "Done"
 
     name_lower = name.lower()
 
-    if name_lower in ("list_files", "listfiles"):
-        file_list = [l for l in result_stripped.split("\n") if l.strip()]
-        return f"{len(file_list)} items"
-
-    if name_lower == "edit":
-        # Try to extract occurrence count and old/new
-        occ_m = re.search(r"replaced (\d+) occurrence", result_stripped)
-        occ = occ_m.group(0) if occ_m else "applied edit"
-        # Try to find old→new from the result
-        old_m = re.search(r'"([^"]{1,25})".*?[→>].*?"([^"]{1,25})"', result_stripped)
-        if old_m:
-            return f'{occ} — "{old_m.group(1)}" → "{old_m.group(2)}"'
-        return occ
-
     if name_lower == "write":
-        lines = result_stripped.count("\n") + 1 if result_stripped else 0
-        snippet = _extract_first_def(result_stripped)
-        preview = f" — {snippet}" if snippet else ""
-        if len(preview) > 45:
-            preview = preview[:42] + "..."
-        return f"wrote {lines} lines{preview}"
+        # Extract line count
+        m = re.search(r"(\d+) lines?", result_stripped)
+        if m:
+            count = m.group(1)
+        else:
+            count = str(result_stripped.count("\n") + 1) if result_stripped else "?"
+        word = "line" if count == "1" else "lines"
+        return f"Wrote {count} {word}"
 
     if name_lower == "bash":
-        # Check for pytest output first
-        pytest_summary = _parse_pytest_output(result_stripped)
-        if pytest_summary:
-            return pytest_summary
-        lines = result_stripped.split("\n")
+        # Show first meaningful line of output
+        lines = [ln for ln in result_stripped.splitlines() if ln.strip()]
+        if not lines:
+            return "Done"
+        # Check for pytest
+        for ln in lines:
+            if "passed" in ln or "failed" in ln:
+                return ln.strip()[:80]
         if len(lines) == 1 and len(lines[0]) < 80:
             return lines[0]
         return f"{len(lines)} lines of output"
 
     if name_lower == "read":
         lines = result_stripped.count("\n") + 1
-        snippet = _extract_first_def(result_stripped)
-        preview = f" — {snippet}" if snippet else ""
-        if len(preview) > 45:
-            preview = preview[:42] + "..."
-        return f"{lines} lines{preview}"
+        word = "line" if lines == 1 else "lines"
+        return f"{lines} {word}"
 
-    if name_lower == "glob":
-        files = [l for l in result_stripped.split("\n") if l.strip()]
-        return f"{len(files)} files"
-
-    if name_lower == "grep":
-        matches = [l for l in result_stripped.split("\n") if l.strip()]
-        return f"{len(matches)} matches"
+    if name_lower == "edit":
+        return "Applied"
 
     if name_lower == "web_search":
-        lines = [l for l in result_stripped.split("\n") if l.strip()]
-        count = len(lines)
-        first_title = lines[0][:40] + "..." if lines and len(lines[0]) > 40 else (lines[0] if lines else "")
-        return f'{count} results — "{first_title}"' if first_title else f"{count} results"
+        count = result_stripped.count("\n\n") + 1
+        return f"{count} results"
 
     if name_lower == "web_fetch":
-        char_count = len(result_stripped)
-        # First sentence
-        first_sent = re.split(r'[.!?]\s', result_stripped, maxsplit=1)[0]
-        if len(first_sent) > 60:
-            first_sent = first_sent[:57] + "..."
-        if char_count < 1000:
-            return f"{char_count} chars — {first_sent}"
-        elif char_count < 1_000_000:
-            return f"{char_count / 1000:.1f}K chars — {first_sent}"
-        else:
-            return f"{char_count / 1_000_000:.1f}M chars — {first_sent}"
+        chars = len(result_stripped)
+        if chars > 1000:
+            return f"{chars // 1000}K chars"
+        return f"{chars} chars"
+
+    if name_lower == "glob":
+        count = len([ln for ln in result_stripped.splitlines() if ln.strip()])
+        return f"{count} files"
+
+    if name_lower == "grep":
+        count = len([ln for ln in result_stripped.splitlines() if ln.strip()])
+        return f"{count} matches"
+
+    if name_lower in ("list_files", "listfiles"):
+        count = len([ln for ln in result_stripped.splitlines() if ln.strip()])
+        return f"{count} items"
 
     if name_lower == "todo_write":
-        # Try to count tasks
-        done = result_stripped.lower().count("done") + result_stripped.lower().count("completed")
-        progress = result_stripped.lower().count("in progress") + result_stripped.lower().count("in_progress")
-        pending = result_stripped.lower().count("pending")
-        total = done + progress + pending
-        if total > 0:
-            parts = []
-            if done:
-                parts.append(f"{done} done")
-            if progress:
-                parts.append(f"{progress} in progress")
-            if pending:
-                parts.append(f"{pending} pending")
-            return f"{total} tasks — {', '.join(parts)}"
-        return "updated tasks"
+        return result_stripped[:60]
 
-    # Generic: first line, truncated
-    first_line = result_stripped.split("\n")[0]
-    if len(first_line) > 60:
-        first_line = first_line[:57] + "..."
-    return first_line
+    # Generic: first line, max 60 chars
+    first = result_stripped.split("\n")[0][:60]
+    if len(result_stripped.split("\n")[0]) > 60:
+        first = first[:57] + "..."
+    return first
 
 
 # ---------------------------------------------------------------------------
@@ -561,75 +564,81 @@ def _format_time_ago(seconds: float) -> str:
     return f"{days}d ago"
 
 
+def _capitalize_provider(name: str) -> str:
+    """Properly capitalize provider names: 'openai' -> 'OpenAI', 'anthropic' -> 'Anthropic'."""
+    special = {"openai": "OpenAI", "anthropic": "Anthropic"}
+    return special.get(name.lower(), name.capitalize())
+
+
 def _print_banner(
     config: AgentConfig,
     tool_names: list[str],
     session_info: dict | None = None,
     mcp_servers: list[str] | None = None,
+    skill_count: int = 0,
 ) -> None:
-    """Print the startup banner box."""
+    """Print a compact startup banner box (~50 chars wide)."""
     home = os.path.expanduser("~")
     wd = os.path.abspath(config.working_directory)
     display_dir = wd.replace(home, "~") if wd.startswith(home) else wd
+
+    # Add git branch if in a repo
+    branch = _get_git_branch(config.working_directory)
+    if branch:
+        display_dir = f"{display_dir} ({branch})"
+
     model = config.model or "(default)"
-    provider_display = f"{config.provider.capitalize()} ({model})"
+    provider_name = _capitalize_provider(config.provider)
+    provider_display = f"{provider_name} \u00b7 {model}"
 
-    # Separate built-in and MCP tools for display
-    builtin_tools = [t for t in tool_names if not t.startswith("mcp__")]
-    mcp_tools = [t for t in tool_names if t.startswith("mcp__")]
+    tool_count = len(tool_names)
 
-    if mcp_tools:
-        tools_display = f"{len(builtin_tools)} built-in + {len(mcp_tools)} from MCP"
-    else:
-        tools_display = ", ".join(tool_names)
+    # Build summary line: "31 tools · 2 skills · /help for commands"
+    summary_parts = [f"{tool_count} tools"]
+    if skill_count > 0:
+        summary_parts.append(f"{skill_count} skills")
+    summary_parts.append("/help for commands")
+    summary_line = " \u00b7 ".join(summary_parts)
+
+    # Fixed-width box (~48 inner width)
+    BOX_WIDTH = 48
 
     # Content lines as (display_text, visual_width) tuples
-    # Emoji takes 2 terminal columns, so we track visual width separately
     title = f"\U0001f9c2 SaltAgent v{__version__}"
-    content_lines = [
+    content_lines: list[tuple[str, int]] = [
         (title, len(title) + 1),  # +1 for emoji extra column width
         ("", 0),
-        (f"Provider: {provider_display}", None),
-        (f"Directory: {display_dir}", None),
-        (f"Tools: {tools_display}", None),
+        (f"Provider: {provider_display}", len(f"Provider: {provider_display}")),
+        (f"Directory: {display_dir}", len(f"Directory: {display_dir}")),
+        ("", 0),
+        (summary_line, len(summary_line)),
     ]
-
-    # MCP server names
-    if mcp_servers:
-        content_lines.append((f"MCP: {', '.join(mcp_servers)}", None))
 
     # Session resume indicator
     if session_info:
         turns = session_info.get("turns", 0)
         time_ago = session_info.get("time_ago", "")
-        content_lines.append((f"\u21bb Resuming session ({turns} turns, {time_ago})", None))
+        resume_text = f"\u21bb Resuming session ({turns} turns, {time_ago})"
+        content_lines.append((resume_text, len(resume_text)))
 
-    content_lines += [
-        ("", 0),
-        ("Type your request, or /help for commands.", None),
-    ]
-    # Fill in None visual widths with len
-    content_lines = [(t, w if w is not None else len(t)) for t, w in content_lines]
-
-    max_len = max(w for _, w in content_lines) + 4
-    box_width = max(max_len, 50)
+    content_lines.append(("", 0))
 
     _write("\n")
-    _write(f"  {_c(_DIM, '\u256d' + '\u2500' * box_width + '\u256e')}\n")
-    _write(f"  {_c(_DIM, '\u2502')}{' ' * box_width}{_c(_DIM, '\u2502')}\n")
+    _write(f"{_c(_DIM, '\u256d' + '\u2500' * BOX_WIDTH + '\u256e')}\n")
+    _write(f"{_c(_DIM, '\u2502')}{' ' * BOX_WIDTH}{_c(_DIM, '\u2502')}\n")
 
     for text, vis_width in content_lines:
         if not text:
-            _write(f"  {_c(_DIM, '\u2502')}{' ' * box_width}{_c(_DIM, '\u2502')}\n")
+            _write(f"{_c(_DIM, '\u2502')}{' ' * BOX_WIDTH}{_c(_DIM, '\u2502')}\n")
         else:
-            padding = box_width - vis_width - 2  # -2 for left indent
+            padding = max(BOX_WIDTH - vis_width - 2, 0)
             display = text
             if text.startswith("\U0001f9c2"):
                 display = _c(_BOLD, text)
-            _write(f"  {_c(_DIM, '\u2502')}  {display}{' ' * padding}{_c(_DIM, '\u2502')}\n")
+            _write(f"{_c(_DIM, '\u2502')}  {display}{' ' * padding}{_c(_DIM, '\u2502')}\n")
 
-    _write(f"  {_c(_DIM, '\u2502')}{' ' * box_width}{_c(_DIM, '\u2502')}\n")
-    _write(f"  {_c(_DIM, '\u2570' + '\u2500' * box_width + '\u256f')}\n")
+    _write(f"{_c(_DIM, '\u2502')}{' ' * BOX_WIDTH}{_c(_DIM, '\u2502')}\n")
+    _write(f"{_c(_DIM, '\u2570' + '\u2500' * BOX_WIDTH + '\u256f')}\n")
     _write("\n")
 
 
@@ -682,6 +691,129 @@ _SLASH_COMMANDS = {
     "/help": "Show available commands",
     "/quit": "Exit",
 }
+
+
+# ---------------------------------------------------------------------------
+# Tab completion and persistent history
+# ---------------------------------------------------------------------------
+
+HISTORY_FILE = Path.home() / ".salt-agent" / "history"
+
+
+class SlashCompleter:
+    """Tab completion for slash commands and file paths."""
+
+    def __init__(self, commands: list[str], agent=None):
+        self.commands = sorted(commands)
+        self.agent = agent
+        self._matches: list[str] = []
+
+    def complete(self, text: str, state: int) -> str | None:
+        if state == 0:
+            if text.startswith("/"):
+                # Complete slash commands
+                self._matches = [c for c in self.commands if c.startswith(text)]
+                # Also check skill names if agent has a skill_manager
+                if self.agent and hasattr(self.agent, "skill_manager"):
+                    try:
+                        skills = self.agent.skill_manager.list_user_invocable()
+                        skill_cmds = ["/" + s.name for s in skills]
+                        self._matches.extend(
+                            c for c in skill_cmds
+                            if c.startswith(text) and c not in self._matches
+                        )
+                    except Exception:
+                        pass
+                self._matches.sort()
+            elif "/" in text or "." in text:
+                # Complete file paths
+                self._matches = self._path_complete(text)
+            else:
+                self._matches = []
+
+        if state < len(self._matches):
+            return self._matches[state]
+        return None
+
+    def _path_complete(self, text: str) -> list[str]:
+        """Complete file paths."""
+        results = _glob_module.glob(text + "*")
+        # Append / for directories so the user can keep tabbing
+        out: list[str] = []
+        for r in results[:20]:
+            if os.path.isdir(r):
+                out.append(r + "/")
+            else:
+                out.append(r)
+        return out
+
+
+def _setup_readline(agent=None) -> None:
+    """Configure readline: tab completion, persistent history, keybindings."""
+    if _readline is None:
+        return
+
+    # --- Tab completion ---
+    all_commands = list(_SLASH_COMMANDS.keys())
+    completer = SlashCompleter(all_commands, agent)
+    _readline.set_completer(completer.complete)
+    _readline.set_completer_delims(" \t\n")
+
+    # libedit (macOS) vs GNU readline use different bind syntax
+    if "libedit" in (_readline.__doc__ or ""):
+        _readline.parse_and_bind("bind ^I rl_complete")
+    else:
+        _readline.parse_and_bind("tab: complete")
+        # GNU readline: up/down search history by prefix
+        _readline.parse_and_bind('"\\e[A": history-search-backward')
+        _readline.parse_and_bind('"\\e[B": history-search-forward')
+
+    # --- Persistent history ---
+    HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        _readline.read_history_file(str(HISTORY_FILE))
+    except (FileNotFoundError, OSError):
+        pass
+    _readline.set_history_length(1000)
+    atexit.register(_readline.write_history_file, str(HISTORY_FILE))
+
+
+def _is_multiline_start(line: str) -> bool:
+    """Return True if the line signals the start of a triple-backtick block."""
+    return line.strip() == "```" or line.strip().startswith("```")
+
+
+def _read_multiline_backtick() -> str:
+    """Read lines until a closing ``` is encountered. Returns the content between fences."""
+    lines: list[str] = []
+    while True:
+        try:
+            cont_prompt = f"{_c(_DIM, '... ')}" if _USE_COLOR else "... "
+            continuation = input(cont_prompt)
+        except EOFError:
+            break
+        except KeyboardInterrupt:
+            return ""
+        if continuation.strip() == "```":
+            break
+        lines.append(continuation)
+    return "\n".join(lines)
+
+
+def _needs_continuation(line: str) -> bool:
+    """Check if a line needs continuation (unbalanced quotes, trailing : { ()."""
+    stripped = line.rstrip()
+    if not stripped:
+        return False
+    # Trailing backslash (existing behavior)
+    if stripped.endswith("\\"):
+        return True
+    # Unbalanced quotes
+    single_count = stripped.count("'") - stripped.count("\\'")
+    double_count = stripped.count('"') - stripped.count('\\"')
+    if single_count % 2 != 0 or double_count % 2 != 0:
+        return True
+    return False
 
 
 def _handle_slash_command(
@@ -1438,34 +1570,33 @@ def _print_completion_summary(
     tool_calls: int,
     tracker: TokenTracker | None,
 ) -> None:
-    """Print a single dim completion summary line, right-aligned."""
+    """Print a compact dim completion summary line (left-aligned, concise)."""
     parts: list[str] = []
 
     # Elapsed time
     secs = int(elapsed)
     if secs < 60:
-        parts.append(f"Completed in {secs}s")
+        parts.append(f"{secs}s")
     else:
         m, s = divmod(secs, 60)
-        parts.append(f"Completed in {m}m {s}s")
+        parts.append(f"{m}m {s}s")
 
     # Tool calls
     if tool_calls > 0:
-        parts.append(f"{tool_calls} tool call{'s' if tool_calls != 1 else ''}")
+        parts.append(f"{tool_calls} tool{'s' if tool_calls != 1 else ''}")
 
-    # Tokens and cost
+    # Tokens (no cost if negligible)
     if tracker and tracker.total > 0:
         if tracker.total < 1000:
             parts.append(f"{tracker.total} tokens")
         else:
             parts.append(f"{tracker.total / 1000:.1f}k tokens")
         cost = tracker.estimated_cost
-        parts.append(f"${cost:.3f}")
+        if cost >= 0.01:
+            parts.append(f"${cost:.3f}")
 
     summary = " \u00b7 ".join(parts)
-    width = _term_width()
-    padding = max(width - len(summary) - 2, 0)
-    _write(f"{' ' * padding}{_c(_DIM, summary)}\n")
+    _write(f"\n  {_c(_DIM, summary)}\n")
 
 
 # ---------------------------------------------------------------------------
@@ -1615,20 +1746,21 @@ async def _interactive(
     # Print banner
     tool_names = sorted(agent.tools.names())
     mcp_servers = agent.mcp_manager.server_names if agent.mcp_manager and agent.mcp_manager.is_started else None
-    _print_banner(agent.config, tool_names, session_info=session_info, mcp_servers=mcp_servers)
+    skill_count = len(agent.skill_manager.list_user_invocable()) if hasattr(agent, 'skill_manager') and agent.skill_manager else 0
+    _print_banner(agent.config, tool_names, session_info=session_info, mcp_servers=mcp_servers, skill_count=skill_count)
 
     tracker = TokenTracker(model=agent.config.model)
 
-    # Enable readline for history and line editing
-    try:
-        import readline  # noqa: F401
-    except ImportError:
-        pass
+    # Enable readline: tab completion, persistent history, keybindings
+    _setup_readline(agent)
 
     # Build prompt prefix
     home = os.path.expanduser("~")
     wd = os.path.abspath(agent.config.working_directory)
     display_dir = wd.replace(home, "~") if wd.startswith(home) else wd
+
+    # Session title (updated after first turn if persistence provides it)
+    _session_title: list[str | None] = [None]
 
     _last_interrupt: float = 0.0
 
@@ -1652,7 +1784,14 @@ async def _interactive(
             auto_indicator = f" {_c(_YELLOW, 'AUTO')}" if agent.config.auto_mode else ""
             branch = _get_git_branch(agent.config.working_directory)
             branch_str = f" {_c(_DIM, f'({branch})')}" if branch else ""
-            prompt_str = f"{_c(_CYAN, display_dir)}{branch_str}{auto_indicator} {_c(_DIM, '>')} " if _USE_COLOR else f"{display_dir}{f' ({branch})' if branch else ''}{' AUTO' if agent.config.auto_mode else ''} > "
+            # Session title in prompt (Feature 5)
+            title_str = ""
+            if _session_title[0]:
+                short_title = _session_title[0][:30]
+                if len(_session_title[0]) > 30:
+                    short_title += "..."
+                title_str = f" {_c(_DIM, chr(0xB7))} {_c(_DIM, short_title)}" if _USE_COLOR else f" - {short_title}"
+            prompt_str = f"{_c(_CYAN, display_dir)}{branch_str}{title_str}{auto_indicator} {_c(_DIM, '>')} " if _USE_COLOR else f"{display_dir}{f' ({branch})' if branch else ''}{title_str}{' AUTO' if agent.config.auto_mode else ''} > "
             line = input(prompt_str)
         except EOFError:
             _write(f"\n{_c(_DIM, 'Goodbye!')}\n")
@@ -1661,18 +1800,26 @@ async def _interactive(
             _write("\n")  # Clear the ^C, show fresh prompt (like Claude Code)
             continue
 
-        # Multi-line support: lines ending with backslash
-        while line.endswith("\\"):
-            try:
-                cont_prompt = f"{_c(_DIM, '... >')} " if _USE_COLOR else "... > "
-                continuation = input(cont_prompt)
-                line = line[:-1] + "\n" + continuation
-            except EOFError:
-                break
-            except KeyboardInterrupt:
-                _write("\n")
-                line = ""
-                break
+        # Multi-line support: triple-backtick block
+        if line.strip() == "```":
+            line = _read_multiline_backtick()
+            if not line:
+                continue
+        else:
+            # Legacy: lines ending with backslash, or unbalanced quotes
+            while _needs_continuation(line):
+                if line.endswith("\\"):
+                    line = line[:-1]
+                try:
+                    cont_prompt = f"{_c(_DIM, '... >')} " if _USE_COLOR else "... > "
+                    continuation = input(cont_prompt)
+                    line = line + "\n" + continuation
+                except EOFError:
+                    break
+                except KeyboardInterrupt:
+                    _write("\n")
+                    line = ""
+                    break
 
         line = line.strip()
         if not line:
@@ -1732,14 +1879,26 @@ async def _interactive(
                 _write(f"\n  {_c(_RED, f'\u274c {err_msg}')}\n\n")
             continue
 
-        # Show follow-up suggestions if available
-        if hasattr(agent, 'stop_hooks') and hasattr(agent.stop_hooks, 'last_suggestions'):
-            suggestions = agent.stop_hooks.last_suggestions
-            if suggestions:
-                _write(f"\n  {_c(_DIM, 'Suggestions:')}\n")
-                for s in suggestions:
-                    _write(f"    {_c(_DIM, f'→ {s}')}\n")
-                _write("\n")
+        # Update session title from persistence (Feature 5)
+        if _session_title[0] is None and agent.persistence:
+            try:
+                title = getattr(agent.persistence, "session_title", None)
+                if callable(title):
+                    title = title()
+                if title:
+                    _session_title[0] = title
+            except Exception:
+                pass
+
+        # Show follow-up suggestions only if enabled in config
+        if getattr(agent.config, 'show_suggestions', False):
+            if hasattr(agent, 'stop_hooks') and hasattr(agent.stop_hooks, 'last_suggestions'):
+                suggestions = agent.stop_hooks.last_suggestions
+                if suggestions:
+                    _write(f"\n  {_c(_DIM, 'Suggestions:')}\n")
+                    for s in suggestions:
+                        _write(f"    {_c(_DIM, f'→ {s}')}\n")
+                    _write("\n")
 
         _write("\n")
 
@@ -1855,6 +2014,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Disable session persistence",
     )
     parser.add_argument(
+        "--suggestions",
+        action="store_true",
+        help="Show follow-up suggestions after each turn",
+    )
+    parser.add_argument(
         "--append-system-prompt",
         help="Append to the default system prompt",
     )
@@ -1916,6 +2080,10 @@ def main(argv: list[str] | None = None) -> None:
         enable_mcp=not args.no_mcp,
         coordinator_mode=args.coordinator,
     )
+
+    # --suggestions: enable follow-up suggestions
+    if args.suggestions:
+        config.show_suggestions = True
 
     # --max-budget-usd: set budget limit
     if args.max_budget_usd is not None:

@@ -53,3 +53,5 @@ class AgentConfig:
     skill_dirs: list = field(default_factory=list)
     # Budget limit — maximum dollar amount to spend on API calls (0 = unlimited)
     max_budget_usd: float = 0.0
+    # Show follow-up suggestions after each turn (default: OFF)
+    show_suggestions: bool = False

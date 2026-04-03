@@ -6,8 +6,10 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from salt_agent.compaction import (
+    context_collapse,
     estimate_tokens,
     estimate_messages_tokens,
+    history_snip,
     needs_compaction,
     compact_context,
 )
@@ -239,3 +241,179 @@ class TestCompactContext:
 
         # The summarization prompt should mention the files
         assert any("a.py" in p or "b.py" in p for p in received_prompt)
+
+
+class TestHistorySnip:
+    def test_no_snip_under_threshold(self):
+        """Messages under 60% threshold should not be snipped."""
+        msgs = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "x" * 500},
+        ]
+        result = history_snip(msgs, context_window=200_000)
+        assert result[1]["content"] == "x" * 500  # unchanged
+
+    def test_snips_old_assistant_text(self):
+        """Old assistant text over 300 chars should be snipped at 60%."""
+        long_text = "a" * 1000
+        msgs = [
+            {"role": "assistant", "content": long_text},
+            {"role": "user", "content": "x" * 500},
+            {"role": "assistant", "content": "recent response"},
+            {"role": "user", "content": "latest"},
+        ]
+        # context_window=100 so even small messages exceed 60% (60 tokens = 240 chars)
+        result = history_snip(msgs, context_window=100)
+        # First assistant msg should be snipped
+        assert "[...snipped for context]" in result[0]["content"]
+        assert len(result[0]["content"]) < len(long_text)
+
+    def test_preserves_recent_half(self):
+        """Messages in the second half should not be snipped."""
+        msgs = [
+            {"role": "user", "content": "old"},
+            {"role": "assistant", "content": "short"},
+            {"role": "user", "content": "mid"},
+            {"role": "assistant", "content": "b" * 1000},  # in second half
+        ]
+        result = history_snip(msgs, context_window=100)
+        # Message at index 3 (second half, midpoint=2) should be untouched
+        assert result[3]["content"] == "b" * 1000
+
+    def test_snips_list_content_text_blocks(self):
+        """List-style assistant content should have text blocks snipped."""
+        msgs = [
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "z" * 500},
+                    {"type": "tool_use", "name": "read", "input": {}},
+                ],
+            },
+            {"role": "user", "content": "x" * 500},
+            {"role": "assistant", "content": "recent"},
+            {"role": "user", "content": "latest"},
+        ]
+        result = history_snip(msgs, context_window=100)
+        content = result[0]["content"]
+        # text block should be snipped
+        assert "[...snipped]" in content[0]["text"]
+        # tool_use block should be preserved
+        assert content[1]["type"] == "tool_use"
+
+    def test_leaves_short_text_blocks_alone(self):
+        """Text blocks under 300 chars should not be snipped."""
+        msgs = [
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "short"}],
+            },
+            {"role": "user", "content": "x" * 500},
+            {"role": "assistant", "content": "r"},
+            {"role": "user", "content": "l"},
+        ]
+        result = history_snip(msgs, context_window=100)
+        assert result[0]["content"][0]["text"] == "short"
+
+    def test_skips_user_messages(self):
+        """User messages should never be snipped."""
+        msgs = [
+            {"role": "user", "content": "u" * 1000},
+            {"role": "assistant", "content": "a" * 1000},
+            {"role": "user", "content": "latest"},
+            {"role": "assistant", "content": "done"},
+        ]
+        result = history_snip(msgs, context_window=100)
+        assert result[0]["content"] == "u" * 1000  # user msg untouched
+
+
+class TestContextCollapse:
+    def test_no_collapse_under_threshold(self):
+        """Messages under 70% threshold should not be collapsed."""
+        msgs = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "world"},
+        ]
+        result = context_collapse(msgs, context_window=200_000)
+        assert len(result) == 2
+
+    def test_collapses_tool_pairs(self):
+        """Tool use + result pairs in first half should be collapsed."""
+        msgs = [
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "name": "read_file", "input": {"path": "/a"}},
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "content": "file contents " * 100},
+                ],
+            },
+            {"role": "user", "content": "x" * 500},
+            {"role": "assistant", "content": "y" * 500},
+        ]
+        result = context_collapse(msgs, context_window=100)
+        # First two messages should be collapsed into one summary
+        assert len(result) < len(msgs)
+        assert "[Tool calls: read_file]" in result[0]["content"]
+
+    def test_preserves_second_half(self):
+        """Messages in the second half should never be collapsed."""
+        msgs = [
+            {"role": "user", "content": "old"},
+            {"role": "assistant", "content": "old reply"},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "name": "bash", "input": {}},
+                ],
+            },
+            {
+                "role": "user",
+                "content": [{"type": "tool_result", "content": "output"}],
+            },
+        ]
+        result = context_collapse(msgs, context_window=100)
+        # midpoint=2, so msgs at index 2,3 are in second half
+        # They should be preserved as-is
+        assert any(
+            isinstance(m.get("content"), list)
+            for m in result
+            if m.get("role") == "assistant"
+        )
+
+    def test_multiple_tool_names_in_summary(self):
+        """Collapsed summary should list all tool names."""
+        msgs = [
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "name": "read", "input": {}},
+                    {"type": "tool_use", "name": "write", "input": {}},
+                ],
+            },
+            {
+                "role": "user",
+                "content": [{"type": "tool_result", "content": "ok"}],
+            },
+            {"role": "user", "content": "x" * 500},
+            {"role": "assistant", "content": "y" * 500},
+        ]
+        result = context_collapse(msgs, context_window=100)
+        collapsed = result[0]["content"]
+        assert "read" in collapsed
+        assert "write" in collapsed
+
+    def test_non_tool_messages_preserved(self):
+        """Non-tool messages in first half should pass through."""
+        msgs = [
+            {"role": "user", "content": "hello " * 100},
+            {"role": "assistant", "content": "world " * 100},
+            {"role": "user", "content": "more " * 100},
+            {"role": "assistant", "content": "done " * 100},
+        ]
+        result = context_collapse(msgs, context_window=100)
+        assert len(result) == 4  # no tool pairs, nothing to collapse

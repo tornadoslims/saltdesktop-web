@@ -173,3 +173,60 @@ class TestScriptsAndReferences:
         skill = mgr.get("no-scripts")
         assert skill.scripts_dir is None
         assert skill.references_dir is None
+
+
+class TestBundledSkills:
+    """Verify all expected bundled skills are discovered."""
+
+    EXPECTED_BUNDLED = {"commit", "review", "simplify", "debug", "test", "explain", "refactor"}
+
+    def test_all_bundled_skills_discovered(self):
+        mgr = SkillManager()
+        names = {s.name for s in mgr.list_skills()}
+        for expected in self.EXPECTED_BUNDLED:
+            assert expected in names, f"Bundled skill '{expected}' not found"
+
+    def test_bundled_skills_have_descriptions(self):
+        mgr = SkillManager()
+        for name in self.EXPECTED_BUNDLED:
+            skill = mgr.get(name)
+            assert skill is not None, f"Skill '{name}' not found"
+            assert skill.description, f"Skill '{name}' has no description"
+
+    def test_bundled_skills_have_content(self):
+        mgr = SkillManager()
+        for name in self.EXPECTED_BUNDLED:
+            skill = mgr.get(name)
+            assert skill is not None
+            assert len(skill.content) > 10, f"Skill '{name}' has insufficient content"
+
+    def test_bundled_skills_are_user_invocable(self):
+        mgr = SkillManager()
+        invocable = {s.name for s in mgr.list_user_invocable()}
+        for name in self.EXPECTED_BUNDLED:
+            assert name in invocable, f"Skill '{name}' should be user-invocable"
+
+    def test_invoke_simplify(self):
+        mgr = SkillManager()
+        content = mgr.invoke("simplify")
+        assert "complexity" in content.lower() or "simpl" in content.lower()
+
+    def test_invoke_debug(self):
+        mgr = SkillManager()
+        content = mgr.invoke("debug")
+        assert "root cause" in content.lower() or "error" in content.lower()
+
+    def test_invoke_test(self):
+        mgr = SkillManager()
+        content = mgr.invoke("test")
+        assert "test" in content.lower()
+
+    def test_invoke_explain(self):
+        mgr = SkillManager()
+        content = mgr.invoke("explain")
+        assert "explain" in content.lower()
+
+    def test_invoke_refactor(self):
+        mgr = SkillManager()
+        content = mgr.invoke("refactor")
+        assert "refactor" in content.lower()

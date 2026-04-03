@@ -36,9 +36,11 @@ class GlobTool(Tool):
             return f"Error: Not a directory: {search_path}"
 
         try:
-            matches = sorted(base.glob(pattern))
+            matches = list(base.glob(pattern))
             # Filter out hidden dirs and common noise
             matches = [m for m in matches if not any(p.startswith(".") for p in m.relative_to(base).parts[:-1])]
+            # Sort by modification time (newest first), matching Claude Code behavior
+            matches = sorted(matches, key=lambda p: p.stat().st_mtime, reverse=True)
         except Exception as e:
             return f"Error: {e}"
 

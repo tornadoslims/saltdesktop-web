@@ -140,7 +140,7 @@ class TestToolDisplay:
         monkeypatch.setattr("salt_agent.cli._USE_COLOR", False)
         events = [ToolStart(tool_name="bash", tool_input={"command": "ls"})]
         output = capture_render_output(events, verbose=False)
-        assert "bash" in output
+        assert "Bash" in output
         assert "ls" in output
 
     def test_tool_end_success_shows_checkmark(self, monkeypatch):
@@ -157,36 +157,36 @@ class TestToolDisplay:
 
     def test_tool_brief_write(self):
         result = _tool_brief("write", {"file_path": "/tmp/hello.py"})
-        assert "write" in result
+        assert "Write" in result
         assert "hello.py" in result
 
     def test_tool_brief_bash(self):
         result = _tool_brief("bash", {"command": "python test.py"})
-        assert "bash" in result
+        assert "Bash" in result
         assert "python test.py" in result
 
     def test_tool_brief_read(self):
         result = _tool_brief("read", {"file_path": "/tmp/data.txt"})
-        assert "read" in result
+        assert "Read" in result
         assert "data.txt" in result
 
     def test_tool_brief_edit(self):
         result = _tool_brief("edit", {"file_path": "/tmp/main.py"})
-        assert "edit" in result
+        assert "Edit" in result
         assert "main.py" in result
 
     def test_tool_brief_web_search(self):
         result = _tool_brief("web_search", {"query": "python docs"})
-        # web_search is not a known brief, returns tool name
-        assert "web_search" in result
+        assert "Search" in result
+        assert "python docs" in result
 
     def test_tool_brief_unknown_tool(self):
         result = _tool_brief("foobar_tool", {"x": 1})
-        assert result == "foobar_tool"
+        assert result == "Foobar Tool"
 
     def test_tool_result_brief_write(self):
-        result = _tool_result_brief("write", "def hello():\n    pass\n", True)
-        assert "wrote" in result
+        result = _tool_result_brief("write", "Wrote 2 lines", True)
+        assert "Wrote" in result
         assert "lines" in result
 
     def test_tool_result_brief_bash_success(self):
@@ -201,7 +201,6 @@ class TestToolDisplay:
         pytest_output = "===== 42 passed in 1.5s ====="
         result = _tool_result_brief("bash", pytest_output, True)
         assert "42 passed" in result
-        assert "0 failed" in result
 
     def test_tool_result_brief_read(self):
         content = "import os\nimport sys\n\ndef main():\n    pass\n"
@@ -210,18 +209,17 @@ class TestToolDisplay:
 
     def test_tool_result_brief_edit(self):
         result = _tool_result_brief("edit", "Applied successfully", True)
-        assert "applied edit" in result
+        assert result == "Applied"
 
     def test_tool_result_brief_web_search(self):
-        search_results = "Python Tutorial - W3Schools\nPython.org\nLearn Python"
+        search_results = "Python Tutorial - W3Schools\n\nPython.org\n\nLearn Python"
         result = _tool_result_brief("web_search", search_results, True)
         assert "3 results" in result
 
     def test_tool_result_brief_todo(self):
         todo_output = "Task 1: pending\nTask 2: done\nTask 3: in progress"
         result = _tool_result_brief("todo_write", todo_output, True)
-        assert "tasks" in result
-        assert "done" in result
+        assert "Task 1" in result
 
     def test_tool_result_brief_web_fetch(self):
         content = "This is a webpage about Python programming. It covers basics and advanced topics."
@@ -999,20 +997,18 @@ class TestToolResultBriefExtended:
 
     def test_empty_success_result(self):
         result = _tool_result_brief("bash", "", True)
-        assert result == "done"
+        assert result == "Done"
 
     def test_write_result_with_def(self):
-        content = "def hello_world():\n    print('Hello, World!')\n"
+        content = "Wrote 2 lines"
         result = _tool_result_brief("write", content, True)
-        assert "wrote" in result
-        assert "lines" in result
-        assert "hello_world" in result
+        assert "Wrote" in result
+        assert "2 lines" in result
 
     def test_read_result_with_import(self):
         content = "import os\nimport sys\n\nx = 1\n"
         result = _tool_result_brief("read", content, True)
         assert "lines" in result
-        assert "import os" in result
 
     def test_web_fetch_small(self):
         content = "Short page content."
@@ -1027,14 +1023,11 @@ class TestToolResultBriefExtended:
     def test_todo_with_mixed_states(self):
         output = "Task A: done\nTask B: in progress\nTask C: pending\nTask D: pending"
         result = _tool_result_brief("todo_write", output, True)
-        assert "4 tasks" in result
-        assert "1 done" in result
-        assert "1 in progress" in result
-        assert "2 pending" in result
+        assert "Task A: done" in result
 
     def test_edit_with_replacement_count(self):
         result = _tool_result_brief("edit", 'replaced 3 occurrences: "old" -> "new"', True)
-        assert "replaced 3 occurrence" in result
+        assert result == "Applied"
 
 
 # ---------------------------------------------------------------------------

@@ -57,13 +57,17 @@ class PluginManager:
         return list(self._errors)
 
     def discover(self) -> list[SaltPlugin]:
-        """Discover and load plugins from configured directories.
+        """Discover and load plugins from configured directories and entry_points.
 
         Returns the list of successfully loaded plugins.
         """
         self._plugins.clear()
         self._errors.clear()
 
+        # Discover from entry_points (pip-installed plugins)
+        self._discover_from_entry_points()
+
+        # Discover from directories (directory plugins override entry_points)
         for dir_path_str in self.plugin_dirs:
             path = Path(dir_path_str).expanduser().resolve()
             if not path.exists():
@@ -82,6 +86,32 @@ class PluginManager:
                     self._errors.append(f"Error loading {plugin_file}: {e}")
 
         return list(self._plugins)
+
+    def _discover_from_entry_points(self) -> None:
+        """Discover plugins registered via pip entry_points (group: salt_agent.plugins)."""
+        try:
+            if sys.version_info >= (3, 12):
+                from importlib.metadata import entry_points
+                eps = entry_points(group="salt_agent.plugins")
+            else:
+                from importlib.metadata import entry_points
+                all_eps = entry_points()
+                if isinstance(all_eps, dict):
+                    eps = all_eps.get("salt_agent.plugins", [])
+                else:
+                    # Python 3.9-3.11: SelectableGroups
+                    eps = all_eps.select(group="salt_agent.plugins") if hasattr(all_eps, "select") else []
+
+            for ep in eps:
+                try:
+                    plugin_class = ep.load()
+                    if isinstance(plugin_class, type) and issubclass(plugin_class, SaltPlugin):
+                        plugin = plugin_class()
+                        self._plugins.append(plugin)
+                except Exception as e:
+                    self._errors.append(f"Error loading entry_point {ep.name}: {e}")
+        except Exception as e:
+            self._errors.append(f"Error discovering entry_points: {e}")
 
     def _load_plugin_file(self, plugin_file: Path) -> list[SaltPlugin]:
         """Load a single plugin file and return SaltPlugin instances found."""

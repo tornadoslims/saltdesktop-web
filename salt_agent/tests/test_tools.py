@@ -308,8 +308,12 @@ class TestGrepTool:
     def test_grep_basic(self, tmp_path):
         (tmp_path / "test.txt").write_text("hello world\nfoo bar\nhello again\n")
         tool = GrepTool(working_directory=str(tmp_path))
+        # Default output_mode is files_with_matches (file paths)
         result = tool.execute(pattern="hello", path=str(tmp_path))
-        assert "hello" in result
+        assert "test.txt" in result
+        # Content mode shows matching lines
+        result_content = tool.execute(pattern="hello", path=str(tmp_path), output_mode="content")
+        assert "hello" in result_content
 
     def test_grep_no_match(self, tmp_path):
         (tmp_path / "test.txt").write_text("hello world\n")

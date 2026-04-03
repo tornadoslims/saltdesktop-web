@@ -137,7 +137,7 @@ class TestAPIKeyResolution:
 class TestToolBrief:
     def test_bash_tool(self):
         result = _tool_brief("bash", {"command": "echo hello"})
-        assert "bash" in result
+        assert "Bash" in result
         assert "echo hello" in result
 
     def test_bash_long_command_truncated(self):
@@ -147,47 +147,50 @@ class TestToolBrief:
 
     def test_write_tool(self):
         result = _tool_brief("write", {"file_path": "/tmp/test.txt"})
-        assert "write" in result
+        assert "Write" in result
+        assert "test.txt" in result
 
     def test_edit_tool(self):
         result = _tool_brief("edit", {"file_path": "/tmp/test.txt"})
-        assert "edit" in result
+        assert "Edit" in result
+        assert "test.txt" in result
 
     def test_read_tool(self):
         result = _tool_brief("read", {"file_path": "/tmp/test.txt"})
-        assert "read" in result
+        assert "Read" in result
+        assert "test.txt" in result
 
     def test_glob_tool(self):
         result = _tool_brief("glob", {"pattern": "*.py"})
-        assert "glob" in result
+        assert "Glob" in result
         assert "*.py" in result
 
     def test_grep_tool(self):
         result = _tool_brief("grep", {"pattern": "TODO"})
-        assert "grep" in result
+        assert "Grep" in result
         assert "TODO" in result
 
     def test_list_files_tool(self):
         result = _tool_brief("list_files", {"path": "/tmp"})
-        assert "ls" in result
+        assert "List" in result
 
     def test_unknown_tool(self):
         result = _tool_brief("custom_tool", {"arg": "val"})
-        assert result == "custom_tool"
+        assert result == "Custom Tool"
 
 
 class TestToolResultBrief:
     def test_success_empty_result(self):
         result = _tool_result_brief("bash", "", True)
-        assert result == "done"
+        assert result == "Done"
 
     def test_edit_success(self):
         result = _tool_result_brief("edit", "Applied successfully", True)
-        assert "applied edit" in result
+        assert result == "Applied"
 
     def test_write_success(self):
-        result = _tool_result_brief("write", "Wrote file", True)
-        assert "wrote" in result
+        result = _tool_result_brief("write", "Wrote 5 lines", True)
+        assert "Wrote" in result
 
     def test_bash_single_line(self):
         result = _tool_result_brief("bash", "hello world", True)
@@ -375,6 +378,16 @@ class TestNewCLIFlags:
         args = parser.parse_args(["hello"])
         assert args.max_budget_usd is None
 
+    def test_suggestions_flag(self):
+        parser = _build_parser()
+        args = parser.parse_args(["--suggestions", "hello"])
+        assert args.suggestions is True
+
+    def test_suggestions_default_false(self):
+        parser = _build_parser()
+        args = parser.parse_args(["hello"])
+        assert args.suggestions is False
+
     def test_bare_flag(self):
         parser = _build_parser()
         args = parser.parse_args(["--bare", "hello"])
@@ -430,3 +443,150 @@ class TestGitBranch:
         from salt_agent.cli import _get_git_branch
         branch = _get_git_branch("/nonexistent/path/that/does/not/exist")
         assert branch == ""
+
+
+# ---------------------------------------------------------------------------
+# Tab completion (Feature 1)
+# ---------------------------------------------------------------------------
+
+class TestSlashCompleter:
+    def test_matches_slash_commands(self):
+        from salt_agent.cli import SlashCompleter
+        completer = SlashCompleter(["/help", "/history", "/clear", "/commit", "/compact", "/config"])
+        # state=0 triggers match generation
+        result = completer.complete("/he", 0)
+        assert result == "/help"
+        # No second match
+        assert completer.complete("/he", 1) is None
+
+    def test_matches_multiple_commands(self):
+        from salt_agent.cli import SlashCompleter
+        completer = SlashCompleter(["/commit", "/compact", "/config", "/clear"])
+        first = completer.complete("/co", 0)
+        assert first in ("/commit", "/compact", "/config")
+        second = completer.complete("/co", 1)
+        assert second is not None
+        third = completer.complete("/co", 2)
+        assert third is not None
+        fourth = completer.complete("/co", 3)
+        assert fourth is None
+
+    def test_no_matches(self):
+        from salt_agent.cli import SlashCompleter
+        completer = SlashCompleter(["/help", "/clear"])
+        assert completer.complete("/xyz", 0) is None
+
+    def test_empty_slash(self):
+        from salt_agent.cli import SlashCompleter
+        commands = ["/help", "/clear"]
+        completer = SlashCompleter(commands)
+        # "/" should match all commands
+        first = completer.complete("/", 0)
+        assert first is not None
+
+    def test_path_completion(self, tmp_path):
+        from salt_agent.cli import SlashCompleter
+        # Create some files to match
+        (tmp_path / "foo.py").touch()
+        (tmp_path / "bar.py").touch()
+        (tmp_path / "subdir").mkdir()
+        completer = SlashCompleter(["/help"])
+        # Use path prefix + wildcard-triggering prefix
+        results = completer._path_complete(str(tmp_path) + "/")
+        assert len(results) >= 3  # foo.py, bar.py, subdir/
+        # Directories should end with /
+        subdir_matches = [r for r in results if "subdir" in r]
+        assert all(r.endswith("/") for r in subdir_matches)
+        # Files should not end with /
+        file_matches = [r for r in results if r.endswith(".py")]
+        assert all(not r.endswith("/") for r in file_matches)
+
+    def test_skill_completion(self):
+        from salt_agent.cli import SlashCompleter
+        # Mock agent with skill_manager
+        mock_skill = MagicMock()
+        mock_skill.name = "deploy"
+        mock_agent = MagicMock()
+        mock_agent.skill_manager.list_user_invocable.return_value = [mock_skill]
+        completer = SlashCompleter(["/help", "/clear"], agent=mock_agent)
+        # /de should match /deploy from skills
+        result = completer.complete("/de", 0)
+        assert result == "/deploy"
+
+    def test_non_slash_non_path_no_matches(self):
+        from salt_agent.cli import SlashCompleter
+        completer = SlashCompleter(["/help"])
+        assert completer.complete("hello", 0) is None
+
+
+# ---------------------------------------------------------------------------
+# Persistent history (Feature 2)
+# ---------------------------------------------------------------------------
+
+class TestPersistentHistory:
+    def test_history_file_path(self):
+        from salt_agent.cli import HISTORY_FILE
+        assert HISTORY_FILE.name == "history"
+        assert ".salt-agent" in str(HISTORY_FILE)
+
+    def test_setup_readline_creates_dir(self, tmp_path, monkeypatch):
+        from salt_agent.cli import _setup_readline, HISTORY_FILE
+        # Monkeypatch HISTORY_FILE to use tmp_path
+        fake_history = tmp_path / "salt-agent-test" / "history"
+        import salt_agent.cli as cli_mod
+        monkeypatch.setattr(cli_mod, "HISTORY_FILE", fake_history)
+        # _setup_readline should create the parent dir
+        _setup_readline(agent=None)
+        assert fake_history.parent.exists()
+
+
+# ---------------------------------------------------------------------------
+# Multiline input (Feature 3)
+# ---------------------------------------------------------------------------
+
+class TestMultilineInput:
+    def test_needs_continuation_backslash(self):
+        from salt_agent.cli import _needs_continuation
+        assert _needs_continuation("hello \\") is True
+
+    def test_needs_continuation_balanced(self):
+        from salt_agent.cli import _needs_continuation
+        assert _needs_continuation("hello world") is False
+
+    def test_needs_continuation_unbalanced_double_quote(self):
+        from salt_agent.cli import _needs_continuation
+        assert _needs_continuation('say "hello') is True
+        assert _needs_continuation('say "hello"') is False
+
+    def test_needs_continuation_unbalanced_single_quote(self):
+        from salt_agent.cli import _needs_continuation
+        assert _needs_continuation("it's") is True
+        assert _needs_continuation("it\\'s") is False
+
+    def test_needs_continuation_empty(self):
+        from salt_agent.cli import _needs_continuation
+        assert _needs_continuation("") is False
+
+    def test_is_multiline_start(self):
+        from salt_agent.cli import _is_multiline_start
+        assert _is_multiline_start("```") is True
+        assert _is_multiline_start("```python") is True
+        assert _is_multiline_start("  ```") is True
+        assert _is_multiline_start("hello") is False
+        assert _is_multiline_start("hello ```") is False
+
+    def test_read_multiline_backtick(self, monkeypatch):
+        from salt_agent.cli import _read_multiline_backtick
+        # Simulate user typing lines then closing with ```
+        inputs = iter(["line one", "line two", "```"])
+        monkeypatch.setattr("builtins.input", lambda prompt="": next(inputs))
+        result = _read_multiline_backtick()
+        assert result == "line one\nline two"
+
+    def test_read_multiline_backtick_interrupt(self, monkeypatch):
+        from salt_agent.cli import _read_multiline_backtick
+        def raise_interrupt(prompt=""):
+            raise KeyboardInterrupt()
+        monkeypatch.setattr("builtins.input", raise_interrupt)
+        result = _read_multiline_backtick()
+        assert result == ""

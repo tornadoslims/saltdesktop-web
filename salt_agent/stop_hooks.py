@@ -85,6 +85,10 @@ class StopHookRunner:
                 memory_type=memory["type"],
                 description=memory["description"],
             )
+            self.agent.hooks.fire("memory_saved", {
+                "name": memory["name"],
+                "type": memory["type"],
+            })
 
     async def _generate_session_title(self, messages: list[dict], turn: int) -> None:
         """Generate a session title from the first exchange."""
@@ -163,6 +167,9 @@ class StopHookRunner:
                 if file_path.exists():
                     file_path.unlink()
                     self.agent.memory._update_index(filename, "")  # remove from index
+                    self.agent.hooks.fire("memory_deleted", {
+                        "filename": filename,
+                    })
 
     async def _generate_suggestions(self, messages: list[dict], turn: int) -> None:
         """Generate follow-up prompt suggestions.

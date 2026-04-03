@@ -65,6 +65,13 @@ class TaskManager:
         )
         self._tasks[task.id] = task
 
+        # Fire task_created hook
+        if hasattr(self.parent, "hooks"):
+            self.parent.hooks.fire("task_created", {
+                "task_id": task.id,
+                "prompt": task.prompt[:200],
+            })
+
         thread = threading.Thread(
             target=self._run_task,
             args=(task,),
@@ -132,6 +139,19 @@ class TaskManager:
             task.error = str(e)
 
         task.completed_at = datetime.now(timezone.utc).isoformat()
+
+        # Fire task hooks
+        if hasattr(self.parent, "hooks"):
+            if task.status == TaskStatus.COMPLETED:
+                self.parent.hooks.fire("task_completed", {
+                    "task_id": task.id,
+                    "output_length": len(task.output),
+                })
+            elif task.status == TaskStatus.FAILED:
+                self.parent.hooks.fire("task_failed", {
+                    "task_id": task.id,
+                    "error": task.error,
+                })
 
         # Fire completion callbacks
         for cb in self._callbacks:

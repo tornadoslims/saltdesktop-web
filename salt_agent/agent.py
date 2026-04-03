@@ -11,8 +11,10 @@ from typing import AsyncIterator
 from salt_agent.attachments import AttachmentAssembler
 from salt_agent.compaction import (
     compact_context,
+    context_collapse,
     emergency_truncate,
     estimate_messages_tokens,
+    history_snip,
     microcompact_tool_results,
     needs_compaction,
 )
@@ -33,6 +35,7 @@ from salt_agent.events import (
 )
 from salt_agent.file_history import FileHistory
 from salt_agent.hooks import HookEngine, HookResult
+from salt_agent.state import StateStore
 from salt_agent.memory import MemorySystem, find_relevant_memories
 from salt_agent.permissions import PermissionSystem
 from salt_agent.persistence import SessionPersistence
@@ -61,6 +64,7 @@ class SaltAgent:
             max_tool_result_chars=config.max_tool_result_chars,
         )
         self.hooks = HookEngine()
+        self.state = StateStore()
 
         # Memory system
         self.memory = MemorySystem(
@@ -423,6 +427,15 @@ class SaltAgent:
         # Restore conversation history so future run() calls continue it
         agent._conversation_messages = list(messages)
 
+        agent.hooks.fire("session_resume", {
+            "session_id": session_id,
+            "message_count": len(messages),
+        })
+        agent.state.update(
+            session_id=session_id,
+            message_count=len(messages),
+        )
+
         return agent, messages, system
 
     async def run(self, prompt: str) -> AsyncIterator[AgentEvent]:
@@ -432,6 +445,19 @@ class SaltAgent:
         or accumulating), messages from previous run() calls are preserved so the
         agent maintains context across interactive turns.
         """
+        # Fire session_start hook and update state
+        session_id = ""
+        if self.persistence:
+            session_id = self.persistence.session_id
+        self.hooks.fire("session_start", {"session_id": session_id})
+        self.state.update(
+            status="thinking",
+            session_id=session_id,
+            auto_mode=self.config.auto_mode,
+            plan_mode=self.config.plan_mode,
+            coordinator_mode=self.config.coordinator_mode,
+        )
+
         # Lazy-start MCP servers on first run
         if self.mcp_manager and not self._mcp_started:
             try:
@@ -456,6 +482,10 @@ class SaltAgent:
         _last_result_hash: str = ""
 
         for turn in range(self.config.max_turns):
+            # Fire turn_start hook and update state
+            self.hooks.fire("turn_start", {"turn": turn})
+            self.state.update(status="thinking", turn_count=turn + 1)
+
             # --- Loop detection (inspired by Claude Code's stuck-in-a-loop handling) ---
             if self._detect_loop(_recent_tool_sigs):
                 # Inject a "you're stuck" message instead of hard-stopping
@@ -484,10 +514,16 @@ class SaltAgent:
             # Context pressure check
             messages = self.context.manage_pressure(messages)
 
-            # Microcompaction: truncate old tool results before checking full compaction
+            # Layer 1: Microcompaction — truncate old tool results (every turn)
             messages = microcompact_tool_results(messages)
 
-            # Check if compaction is needed
+            # Layer 2: History snip — snip old assistant text at 60%
+            messages = history_snip(messages, self.config.context_window)
+
+            # Layer 3: Context collapse — collapse old tool pairs at 70%
+            messages = context_collapse(messages, self.config.context_window)
+
+            # Layer 4: Autocompact — LLM summarization at 80%
             if needs_compaction(messages, self.config):
                 old_tokens = estimate_messages_tokens(messages)
                 todo_state = self._get_todo_injection()
@@ -502,17 +538,26 @@ class SaltAgent:
                 )
                 new_tokens = estimate_messages_tokens(messages)
 
-                # Emergency truncation if compaction wasn't enough
+                # Layer 5: Emergency truncation at 95%
                 if new_tokens > int(self.config.context_window * 0.95):
                     messages = emergency_truncate(
                         messages, int(self.config.context_window * 0.7)
                     )
                     new_tokens = estimate_messages_tokens(messages)
+                    self.hooks.fire("context_emergency", {
+                        "old_tokens": old_tokens,
+                        "new_tokens": new_tokens,
+                    })
 
                 self.hooks.fire("on_compaction", {
                     "old_tokens": old_tokens,
                     "new_tokens": new_tokens,
                 })
+                self.hooks.fire("context_compacted", {
+                    "old_tokens": old_tokens,
+                    "new_tokens": new_tokens,
+                })
+                self.state.update(status="compacting")
                 yield ContextCompacted(
                     old_tokens=old_tokens,
                     new_tokens=new_tokens,
@@ -550,6 +595,12 @@ class SaltAgent:
                                 f"<system-reminder>\nRelevant memory ({filename}):\n"
                                 f"{content[:2000]}\n</system-reminder>"
                             )
+                    if memory_files:
+                        self.hooks.fire("memory_surfaced", {
+                            "count": len(memory_files),
+                            "files": memory_files,
+                        })
+                        self.state.update(memories_surfaced_this_turn=len(memory_files))
                 except Exception:
                     pass  # Memory recall must never crash the agent
 
@@ -633,10 +684,20 @@ class SaltAgent:
 
             # Record real token usage from provider
             if hasattr(self.provider, "last_usage") and self.provider.last_usage:
-                self.budget.record_usage(
-                    self.provider.last_usage.get("input_tokens", 0),
-                    self.provider.last_usage.get("output_tokens", 0),
+                input_toks = self.provider.last_usage.get("input_tokens", 0)
+                output_toks = self.provider.last_usage.get("output_tokens", 0)
+                self.budget.record_usage(input_toks, output_toks)
+                self.state.update(
+                    total_input_tokens=self.budget.total_input_tokens,
+                    total_output_tokens=self.budget.total_output_tokens,
+                    total_cost=self.budget.total_cost_estimate,
                 )
+
+            # Fire post_api_call hook
+            self.hooks.fire("post_api_call", {
+                "text_length": len(full_text),
+                "tool_use_count": len(tool_uses),
+            })
 
             if _prompt_too_long:
                 # Auto-compact and retry this turn
@@ -685,10 +746,24 @@ class SaltAgent:
                     )
                 except Exception:
                     pass  # Stop hooks must never crash the agent
+                self.hooks.fire("turn_end", {
+                    "turn": turn,
+                    "tool_count": 0,
+                })
                 self.hooks.fire("on_complete", {
                     "turns": turn + 1,
                     "tools_used": tools_used,
                 })
+                self.hooks.fire("session_end", {
+                    "turns": turn + 1,
+                    "tools_used": tools_used,
+                })
+                self.state.update(
+                    status="idle",
+                    current_tool="",
+                    current_tool_input={},
+                    message_count=len(self._conversation_messages),
+                )
                 yield AgentComplete(
                     final_text=full_text,
                     turns=turn + 1,
@@ -773,6 +848,9 @@ class SaltAgent:
                         })
                     if tool_results:
                         self._conversation_messages.append({"role": "user", "content": tool_results})
+                    self.hooks.fire("turn_cancel", {"turn": turn})
+                    self.hooks.fire("session_end", {"turns": turn + 1, "cancelled": True})
+                    self.state.update(status="idle", current_tool="", current_tool_input={})
                     yield AgentError(error="Cancelled by user.", recoverable=False)
                     return
 
@@ -788,6 +866,15 @@ class SaltAgent:
                         "result": result[:500],
                         "success": success,
                     })
+
+                    # Fire file hooks for write/edit tools
+                    if success:
+                        file_path = tu.tool_input.get("file_path", "")
+                        if tu.tool_name == "write" and file_path:
+                            self.hooks.fire("file_written", {"file_path": file_path})
+                        elif tu.tool_name in ("edit", "multi_edit") and file_path:
+                            self.hooks.fire("file_edited", {"file_path": file_path})
+
                     result = self.context.truncate_tool_result(result)
 
                     # Track for loop detection
@@ -818,6 +905,11 @@ class SaltAgent:
                         if hook_result.action == "block":
                             result = f"Tool blocked: {hook_result.reason}"
                             yield ToolStart(tool_name=tu.tool_name, tool_input=tu.tool_input)
+                            self.state.update(
+                                status="executing_tool",
+                                current_tool=tu.tool_name,
+                                current_tool_input=tu.tool_input,
+                            )
                             yield ToolEnd(
                                 tool_name=tu.tool_name,
                                 result=result,
@@ -832,6 +924,11 @@ class SaltAgent:
                             continue
 
                         yield ToolStart(tool_name=tu.tool_name, tool_input=tu.tool_input)
+                        self.state.update(
+                            status="executing_tool",
+                            current_tool=tu.tool_name,
+                            current_tool_input=tu.tool_input,
+                        )
                         tools_used.append(tu.tool_name)
 
                         tool = self.tools.get(tu.tool_name)
@@ -901,6 +998,22 @@ class SaltAgent:
                             "success": success,
                         })
 
+                        # Fire file hooks for write/edit tools
+                        if success:
+                            file_path = tu.tool_input.get("file_path", "")
+                            if tu.tool_name == "write" and file_path:
+                                self.hooks.fire("file_written", {"file_path": file_path})
+                                written = list(self.state.state.files_written)
+                                if file_path not in written:
+                                    written.append(file_path)
+                                    self.state.update(files_written=written)
+                            elif tu.tool_name in ("edit", "multi_edit") and file_path:
+                                self.hooks.fire("file_edited", {"file_path": file_path})
+                                written = list(self.state.state.files_written)
+                                if file_path not in written:
+                                    written.append(file_path)
+                                    self.state.update(files_written=written)
+
                         result = self.context.truncate_tool_result(result)
 
                         # Track for loop detection
@@ -930,6 +1043,9 @@ class SaltAgent:
                             })
                     if tool_results:
                         self._conversation_messages.append({"role": "user", "content": tool_results})
+                    self.hooks.fire("turn_cancel", {"turn": turn})
+                    self.hooks.fire("session_end", {"turns": turn + 1, "cancelled": True})
+                    self.state.update(status="idle", current_tool="", current_tool_input={})
                     yield AgentError(error="Cancelled by user.", recoverable=False)
                     return
 
@@ -948,6 +1064,18 @@ class SaltAgent:
                 read_tool._pending_images.clear()
 
             messages.append({"role": "user", "content": tool_results})
+
+            # Fire turn_end hook and reset tool state
+            self.hooks.fire("turn_end", {
+                "turn": turn,
+                "tool_count": len(tool_uses),
+            })
+            self.state.update(
+                status="idle",
+                current_tool="",
+                current_tool_input={},
+                message_count=len(self._conversation_messages),
+            )
 
             # Run stop hooks between turns (after tool results appended)
             try:

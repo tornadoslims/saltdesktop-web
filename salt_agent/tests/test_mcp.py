@@ -409,6 +409,122 @@ class TestMCPManager:
 # ---------------------------------------------------------------------------
 
 
+class TestMCPServerResourcesPrompts:
+    """Tests for MCPServer resources and prompts fields."""
+
+    def test_server_has_resources_list(self):
+        from salt_agent.mcp.manager import MCPServer
+        server = MCPServer(MCPServerConfig(name="test", command="echo"))
+        assert server.resources == []
+
+    def test_server_has_prompts_list(self):
+        from salt_agent.mcp.manager import MCPServer
+        server = MCPServer(MCPServerConfig(name="test", command="echo"))
+        assert server.prompts == []
+
+
+class TestMCPManagerResourcesPrompts:
+    """Tests for MCPManager get_all_resources and get_all_prompts."""
+
+    def test_get_all_resources_empty(self, tmp_path):
+        from salt_agent.mcp.manager import MCPManager
+        manager = MCPManager(working_directory=str(tmp_path))
+        assert manager.get_all_resources() == []
+
+    def test_get_all_prompts_empty(self, tmp_path):
+        from salt_agent.mcp.manager import MCPManager
+        manager = MCPManager(working_directory=str(tmp_path))
+        assert manager.get_all_prompts() == []
+
+    def test_get_all_resources_includes_server_name(self, tmp_path):
+        from salt_agent.mcp.manager import MCPManager, MCPServer
+        manager = MCPManager(working_directory=str(tmp_path))
+        # Manually add a server with resources
+        server = MCPServer(MCPServerConfig(name="test-srv", command="echo"))
+        server.resources.append({
+            "uri": "file:///tmp/data.json",
+            "name": "data",
+            "description": "Test data",
+            "mime_type": "application/json",
+        })
+        manager._servers["test-srv"] = server
+
+        resources = manager.get_all_resources()
+        assert len(resources) == 1
+        assert resources[0]["server"] == "test-srv"
+        assert resources[0]["uri"] == "file:///tmp/data.json"
+        assert resources[0]["name"] == "data"
+
+    def test_get_all_prompts_includes_server_name(self, tmp_path):
+        from salt_agent.mcp.manager import MCPManager, MCPServer
+        manager = MCPManager(working_directory=str(tmp_path))
+        server = MCPServer(MCPServerConfig(name="prompt-srv", command="echo"))
+        server.prompts.append({
+            "name": "code-review",
+            "description": "Review code",
+            "arguments": [{"name": "file", "required": True}],
+        })
+        manager._servers["prompt-srv"] = server
+
+        prompts = manager.get_all_prompts()
+        assert len(prompts) == 1
+        assert prompts[0]["server"] == "prompt-srv"
+        assert prompts[0]["name"] == "code-review"
+        assert prompts[0]["arguments"][0]["name"] == "file"
+
+    def test_resources_from_multiple_servers(self, tmp_path):
+        from salt_agent.mcp.manager import MCPManager, MCPServer
+        manager = MCPManager(working_directory=str(tmp_path))
+
+        for name in ["srv-a", "srv-b"]:
+            server = MCPServer(MCPServerConfig(name=name, command="echo"))
+            server.resources.append({
+                "uri": f"file:///tmp/{name}.json",
+                "name": f"{name}-data",
+                "description": "",
+                "mime_type": "text/plain",
+            })
+            manager._servers[name] = server
+
+        resources = manager.get_all_resources()
+        assert len(resources) == 2
+        servers = {r["server"] for r in resources}
+        assert servers == {"srv-a", "srv-b"}
+
+    def test_prompts_from_multiple_servers(self, tmp_path):
+        from salt_agent.mcp.manager import MCPManager, MCPServer
+        manager = MCPManager(working_directory=str(tmp_path))
+
+        for name in ["srv-x", "srv-y"]:
+            server = MCPServer(MCPServerConfig(name=name, command="echo"))
+            server.prompts.append({
+                "name": f"{name}-prompt",
+                "description": "",
+                "arguments": [],
+            })
+            manager._servers[name] = server
+
+        prompts = manager.get_all_prompts()
+        assert len(prompts) == 2
+
+    def test_resources_does_not_mutate_server_data(self, tmp_path):
+        from salt_agent.mcp.manager import MCPManager, MCPServer
+        manager = MCPManager(working_directory=str(tmp_path))
+        server = MCPServer(MCPServerConfig(name="srv", command="echo"))
+        server.resources.append({
+            "uri": "file:///x",
+            "name": "x",
+            "description": "",
+            "mime_type": "text/plain",
+        })
+        manager._servers["srv"] = server
+
+        resources = manager.get_all_resources()
+        # The returned dict has "server" key but original should not
+        assert "server" not in server.resources[0]
+        assert "server" in resources[0]
+
+
 class TestConfigIntegration:
     """Verify MCP config fields exist and have correct defaults."""
 
