@@ -496,10 +496,10 @@ class TestAgentTodoIntegration:
         assert "todo_write" in agent.tools.names()
 
     def test_todo_count(self):
-        """Default tools now include 35 tools (10 original + web_search + web_fetch + 3 git + 6 task + skill + tool_search + ask_user + 2 plan_mode + sleep + config + send_message + 2 worktree + brief + python_repl + clipboard + open)."""
+        """Default tools now include 42 tools (10 original + web_search + web_fetch + 3 git + 6 task + skill + tool_search + ask_user + 2 plan_mode + sleep + config + send_message + 2 worktree + brief + python_repl + clipboard + open + notebook_edit + 3 cron + 2 team + mcp_list_resources)."""
         from salt_agent import create_agent
         agent = create_agent(provider="anthropic")
-        assert len(agent.tools.names()) == 35
+        assert len(agent.tools.names()) == 42
 
 
 class TestContextCompactedEvent:

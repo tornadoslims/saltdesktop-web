@@ -313,6 +313,25 @@ class SaltAgent:
         from salt_agent.tools.open_tool import OpenTool
         registry.register(OpenTool())
 
+        # Notebook edit tool (Jupyter .ipynb cells)
+        from salt_agent.tools.notebook_edit import NotebookEditTool
+        registry.register(NotebookEditTool(read_tool=read_tool, working_directory=wd))
+
+        # Cron tools (schedule recurring/one-shot tasks)
+        from salt_agent.tools.cron import CronCreateTool, CronDeleteTool, CronListTool
+        registry.register(CronCreateTool(task_manager=self.task_manager))
+        registry.register(CronDeleteTool())
+        registry.register(CronListTool())
+
+        # Team tools (multi-agent coordination)
+        from salt_agent.tools.team import TeamCreateTool, TeamDeleteTool
+        registry.register(TeamCreateTool(task_manager=self.task_manager))
+        registry.register(TeamDeleteTool(task_manager=self.task_manager))
+
+        # MCP resource listing (mcp_manager may not be initialized yet -- lazy bind)
+        from salt_agent.tools.mcp_resources import ListMcpResourcesTool
+        registry.register(ListMcpResourcesTool(mcp_manager=getattr(self, "mcp_manager", None)))
+
         return registry
 
     def _get_provider_tools(self) -> list[dict]:
